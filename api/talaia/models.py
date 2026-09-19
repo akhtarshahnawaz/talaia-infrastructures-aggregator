@@ -209,8 +209,9 @@ class PopulationResult(BaseModel):
     cell_count: int = 0
     confidence: float = 0.6
     note: str = (
-        "Census residents, area-weighted from 1 km2 INE grid cells. "
-        "Not real-time occupancy; excludes tourists and daytime workers."
+        "Census residents, area-weighted from 1 km2 grid cells. Not real-time occupancy: "
+        "excludes tourists, daytime workers and anyone already evacuated. Per-band figures "
+        "are exclusive - each band counts only the ground it adds over earlier bands."
     )
     by_band: dict[str, float] = Field(default_factory=dict)
 
@@ -235,6 +236,12 @@ class ReportSummary(BaseModel):
     asset_count: int = 0
     people_estimate: float = Field(
         0.0, description="Sum of facility capacity estimates. Distinct from resident population."
+    )
+    people_from_registry: float = Field(
+        0.0, description="Portion of people_estimate backed by a registry capacity figure"
+    )
+    people_from_defaults: float = Field(
+        0.0, description="Portion inferred from class defaults - treat as a rough guess"
     )
     population_resident: float = 0.0
     total_value_eur: float = 0.0

@@ -229,7 +229,33 @@ class OpenStreetMap(Connector):
                     log.warning("overpass group failed %s: %s", bbox, exc)
                     return exc
 
-        results = await asyncio.gather(*(one(bbox) for bbox, _ in groups))
+        # Bound the whole warm-up. Outstanding requests are cancelled rather than
+        # allowed to hold up the response; their tiles simply stay stale and are
+        # retried on a later request, which the tile cache makes cheap.
+        tasks = [asyncio.ensure_future(one(bbox)) for bbox, _ in groups]
+        timed_out = False
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True),
+                                   timeout=settings.osm_deadline_s)
+        except asyncio.TimeoutError:
+            timed_out = True
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        results: list[Any] = []
+        for t in tasks:
+            if t.cancelled():
+                results.append(asyncio.TimeoutError("deadline exceeded"))
+            else:
+                exc = t.exception()
+                results.append(exc if exc else t.result())
+        if timed_out:
+            stats["warnings"].append(
+                f"OpenStreetMap fetch exceeded the {settings.osm_deadline_s:.0f}s budget; "
+                f"unfinished tiles were abandoned and will be retried on the next "
+                f"request. Coverage in this area may be partial.")
 
         elements: list[dict] = []
         fresh_keys: list[str] = []

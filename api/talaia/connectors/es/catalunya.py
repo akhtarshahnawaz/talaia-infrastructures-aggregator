@@ -405,7 +405,9 @@ class CatLivestock(Connector):
         provides=["name", "geometry", "address", "capacity.animals",
                   "capacity.livestock_units", "species breakdown"],
         limitations=[
-            "Registered capacity is not the number of animals currently present.",
+            "Registered capacity is a licensed maximum, not animals currently present; "
+            "Catalonia-wide it totals roughly 4x the census herd, so treat it as an "
+            "upper bound on exposure rather than a count.",
             "Coordinates are published as degrees-minutes-seconds text and must be parsed; "
             "float() on them yields an error of up to ~100 km.",
             "The `total_ub` column is a headcount despite its name, and repeats across "

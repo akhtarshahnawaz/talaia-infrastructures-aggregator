@@ -19,7 +19,7 @@ export default function Docs() {
         One required input: a polygon. Everything else has a sensible default.
       </p>
       <div className="mt-4 flex flex-wrap gap-3 text-sm">
-        <a href="/docs" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">Swagger UI ↗</a>
+        <a href="/swagger" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">Swagger UI ↗</a>
         <a href="/redoc" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">ReDoc ↗</a>
         <a href="/openapi.json" id="openapi" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">openapi.json ↗</a>
       </div>

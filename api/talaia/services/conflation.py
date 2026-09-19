@@ -220,26 +220,36 @@ def conflate(assets: Iterable[dict]) -> tuple[list[dict], dict]:
     suggestions: dict[int, set[int]] = defaultdict(set)
     compared = 0
 
-    for (cat, cx, cy), _ in list(buckets.items()):
-        # Compare against this cell and its neighbours so a pair either side of a cell
-        # boundary is still considered.
-        candidates: list[int] = []
+    # Walk assets, not buckets. Iterating buckets and pulling in their eight neighbours
+    # revisits every neighbourhood up to nine times; anchoring on the asset and only
+    # considering higher-indexed partners evaluates each pair exactly once, which is
+    # where almost all of the conflation time was going on dense urban AOIs.
+    cell_of: list[tuple | None] = [None] * n
+    for i, a in enumerate(items):
+        lon, lat = a.get("lon"), a.get("lat")
+        if lon is not None and lat is not None:
+            cell_of[i] = _cell(lon, lat)
+
+    for i, a in enumerate(items):
+        cell = cell_of[i]
+        if cell is None:
+            continue
+        cx, cy = cell
+        cat = a["category"]
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
-                candidates.extend(buckets.get((cat, cx + dx, cy + dy), ()))
-        seen = sorted(set(candidates))
-        for ii in range(len(seen)):
-            for jj in range(ii + 1, len(seen)):
-                i, j = seen[ii], seen[jj]
-                if uf.find(i) == uf.find(j):
-                    continue
-                compared += 1
-                sim, dist = _similarity(items[i], items[j])
-                if _is_match(items[i], items[j], sim, dist):
-                    uf.union(i, j)
-                elif dist <= SUGGEST_M and sim >= SUGGEST_NAME:
-                    suggestions[i].add(j)
-                    suggestions[j].add(i)
+                for j in buckets.get((cat, cx + dx, cy + dy), ()):
+                    if j <= i:
+                        continue
+                    if uf.find(i) == uf.find(j):
+                        continue
+                    compared += 1
+                    sim, dist = _similarity(a, items[j])
+                    if _is_match(a, items[j], sim, dist):
+                        uf.union(i, j)
+                    elif dist <= SUGGEST_M and sim >= SUGGEST_NAME:
+                        suggestions[i].add(j)
+                        suggestions[j].add(i)
 
     clusters: dict[int, list[int]] = defaultdict(list)
     for i in range(n):
@@ -247,6 +257,10 @@ def conflate(assets: Iterable[dict]) -> tuple[list[dict], dict]:
 
     out: list[dict] = []
     merged_count = 0
+    # Map every input index to the id of the asset that survives for it, built as the
+    # output is assembled. Searching `out` for each cluster instead made this step
+    # quadratic and it dominated the whole request on dense AOIs.
+    survivor_of: dict[int, str] = {}
     for root, idxs in clusters.items():
         if len(idxs) == 1:
             a = items[idxs[0]]
@@ -255,29 +269,24 @@ def conflate(assets: Iterable[dict]) -> tuple[list[dict], dict]:
                 "retrieved_at": a.get("retrieved_at"), "fields": ["identity", "geometry"]}])
             a["merged_count"] = 1
             out.append(a)
+            survivor_of[idxs[0]] = a["id"]
         else:
             merged_count += len(idxs) - 1
-            out.append(_merge_cluster([items[i] for i in idxs]))
+            merged = _merge_cluster([items[i] for i in idxs])
+            out.append(merged)
+            for i in idxs:
+                survivor_of[i] = merged["id"]
 
-    # Map suggestions onto surviving ids.
-    id_of = {}
-    for root, idxs in clusters.items():
-        survivor = None
-        for a in out:
-            if any(a["id"] == items[i]["id"] for i in idxs):
-                survivor = a["id"]; break
-        for i in idxs:
-            id_of[i] = survivor
-    suggested = 0
     for a in out:
         a.setdefault("possible_duplicate_of", [])
     by_id = {a["id"]: a for a in out}
+    suggested = 0
     for i, others in suggestions.items():
-        src = by_id.get(id_of.get(i))
+        src = by_id.get(survivor_of.get(i, ""))
         if not src:
             continue
         for j in others:
-            tgt = id_of.get(j)
+            tgt = survivor_of.get(j)
             if tgt and tgt != src["id"] and tgt not in src["possible_duplicate_of"]:
                 src["possible_duplicate_of"].append(tgt)
                 suggested += 1

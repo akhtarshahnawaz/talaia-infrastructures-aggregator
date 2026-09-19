@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     osm_tile_deg: float = 0.05          # ~4 km tiles
     osm_tile_ttl_hours: int = 24 * 14   # OSM changes slowly for infrastructure
     osm_max_tiles_per_request: int = 96 # guard against absurd AOIs
+    # Hard wall-clock budget for the whole Tier B warm-up. Whatever has landed when the
+    # budget expires is used; the rest is abandoned and reported as a warning. An
+    # incident commander cannot wait three minutes for a volunteer tile server.
+    osm_deadline_s: float = 25.0
 
     # --- upstream services ---------------------------------------------
     socrata_base: str = "https://analisi.transparenciacatalunya.cat/resource"

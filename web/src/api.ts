@@ -41,7 +41,8 @@ export interface ExposureReport {
   request_id: string; generated_at: string; aoi_bbox: number[];
   bands: BandSummary[];
   summary: {
-    asset_count: number; people_estimate: number; population_resident: number;
+    asset_count: number; people_estimate: number; people_from_registry: number;
+    people_from_defaults: number; population_resident: number;
     total_value_eur: number; aoi_area_km2: number; critical_assets: number;
     hazardous_assets: number; response_assets: number; livestock_units: number;
     by_category: { category: string; label: string; count: number;

@@ -146,13 +146,15 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
     # -- 8. valuation + scoring ---------------------------------------------
     n_bands = len(aoi.bands)
     assets: list[Asset] = []
+    registry_people_total = 0.0
+    default_people_total = 0.0
     for i, a in enumerate(parsed):
         spec = get_subcategory(a["subcategory"])
         val = estimate(subcategory=a["subcategory"], footprint_m2=a["footprint_m2"],
                        floors=a["floors"], address=a["address"],
                        capacity=a["capacity"], attributes=a["attributes"],
                        geometry_kind=a["geometry_kind"])
-        people, basis = people_estimate(a["subcategory"], a["capacity"])
+        people, basis, is_default = people_estimate(a["subcategory"], a["capacity"])
         bi = band_of[i]
         band = aoi.bands[bi] if bi >= 0 else None
         score = priority(subcategory=a["subcategory"], people=people,
@@ -162,6 +164,11 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
         cap = dict(a["capacity"])
         cap.setdefault("people", people or None)
         cap.setdefault("basis", basis)
+        if is_default:
+            cap["confidence"] = 0.2
+            default_people_total += people
+        else:
+            registry_people_total += people
 
         geometry = None
         if req.include_geometry and a["geojson"]:
@@ -292,6 +299,8 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
     summary = ReportSummary(
         asset_count=len(parsed),
         people_estimate=round(sum(psum), 1),
+        people_from_registry=round(registry_people_total, 1),
+        people_from_defaults=round(default_people_total, 1),
         population_resident=population.total if population else 0.0,
         total_value_eur=round(sum(vsum), 2),
         aoi_area_km2=round(aoi.area_km2, 3),

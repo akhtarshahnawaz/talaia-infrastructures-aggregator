@@ -185,8 +185,10 @@ export default function Playground() {
         <div className="mt-5">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <Metric label="Assets" value={num(report.summary.asset_count)} />
-            <Metric label="Facility occupants" value={num(report.summary.people_estimate)} accent />
-            <Metric label="Census residents" value={num(report.summary.population_resident)} />
+            <Metric label="Facility occupants" value={num(report.summary.people_estimate)} accent
+              sub={`${num(report.summary.people_from_registry)} from registries`} />
+            <Metric label="Census residents" value={num(report.summary.population_resident)}
+              sub={report.population.cell_count ? `${report.population.cell_count} grid cells` : "no grid coverage"} />
             <Metric label="Exposed value" value={eur(report.summary.total_value_eur)} accent />
             <Metric label="Critical assets" value={num(report.summary.critical_assets)} />
             <Metric label="Hazard sites" value={num(report.summary.hazardous_assets)} />
@@ -239,7 +241,16 @@ export default function Playground() {
                     ))}
                   </tbody>
                 </table>
-                <div className="mt-3 text-[11px] leading-relaxed text-slate-500">{report.population.note}</div>
+                <div className="mt-3 space-y-1 text-[11px] leading-relaxed text-slate-500">
+                  <div>{report.population.note}</div>
+                  <div>
+                    Of {num(report.summary.people_estimate)} estimated facility occupants,{" "}
+                    <span className="text-slate-300">{num(report.summary.people_from_registry)}</span> come from
+                    registry capacity figures and{" "}
+                    <span className="text-slate-300">{num(report.summary.people_from_defaults)}</span> are inferred
+                    from class defaults where no figure exists.
+                  </div>
+                </div>
               </Card>
 
               <Card className="p-4">
@@ -358,9 +369,12 @@ export default function Playground() {
   );
 }
 
-const Metric = ({ label, value, accent }: { label: string; value: string; accent?: boolean }) => (
+const Metric = ({ label, value, accent, sub }: {
+  label: string; value: string; accent?: boolean; sub?: string;
+}) => (
   <Card className="p-3">
     <div className="text-[10.5px] uppercase tracking-wider text-slate-500">{label}</div>
     <div className={`mt-0.5 text-xl font-semibold tabular-nums ${accent ? "text-ember-400" : "text-slate-100"}`}>{value}</div>
+    {sub && <div className="mt-0.5 text-[10.5px] text-slate-500">{sub}</div>}
   </Card>
 );

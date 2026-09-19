@@ -62,6 +62,69 @@ def utm_to_wgs84(easting: float, northing: float, zone: int = 31,
     return math.degrees(lon) + math.degrees(lon0), math.degrees(lat)
 
 
+# ETRS89 / LAEA Europe (EPSG:3035) - the grid used by every pan-European raster product.
+_LAEA_LAT0 = math.radians(52.0)
+_LAEA_LON0 = math.radians(10.0)
+_LAEA_FE = 4_321_000.0
+_LAEA_FN = 3_210_000.0
+
+
+def _authalic_q(sin_phi: float, e: float) -> float:
+    return (1 - e * e) * (sin_phi / (1 - e * e * sin_phi * sin_phi)
+                          - (1 / (2 * e)) * math.log((1 - e * sin_phi) / (1 + e * sin_phi)))
+
+
+def laea_to_wgs84(easting: float, northing: float) -> tuple[float, float]:
+    """Inverse Lambert Azimuthal Equal Area (EPSG:3035) -> ``(lon, lat)`` degrees.
+
+    Needed to place pan-European 1 km population grid cells, whose ids encode LAEA
+    coordinates. Implemented directly (Snyder 3-12..3-18) to avoid a PROJ dependency.
+    """
+    e = math.sqrt(_E2)
+    x = easting - _LAEA_FE
+    y = northing - _LAEA_FN
+    q_p = _authalic_q(1.0, e)
+    r_q = _A * math.sqrt(q_p / 2.0)
+    q_0 = _authalic_q(math.sin(_LAEA_LAT0), e)
+    beta_1 = math.asin(q_0 / q_p)
+    m_0 = math.cos(_LAEA_LAT0) / math.sqrt(1 - _E2 * math.sin(_LAEA_LAT0) ** 2)
+    d = _A * m_0 / (r_q * math.cos(beta_1))
+
+    rho = math.hypot(x / d, d * y)
+    if rho < 1e-12:
+        return math.degrees(_LAEA_LON0), math.degrees(_LAEA_LAT0)
+    c_e = 2.0 * math.asin(rho / (2.0 * r_q))
+    cos_ce, sin_ce = math.cos(c_e), math.sin(c_e)
+    beta = math.asin(cos_ce * math.sin(beta_1) + (d * y * sin_ce * math.cos(beta_1) / rho))
+    lon = _LAEA_LON0 + math.atan2(
+        x * sin_ce,
+        d * rho * math.cos(beta_1) * cos_ce - d * d * y * math.sin(beta_1) * sin_ce)
+    # Authalic -> geodetic latitude series.
+    e2, e4, e6 = _E2, _E2 ** 2, _E2 ** 3
+    lat = (beta
+           + (e2 / 3 + 31 * e4 / 180 + 517 * e6 / 5040) * math.sin(2 * beta)
+           + (23 * e4 / 360 + 251 * e6 / 3780) * math.sin(4 * beta)
+           + (761 * e6 / 45360) * math.sin(6 * beta))
+    return math.degrees(lon), math.degrees(lat)
+
+
+_GRD_RE = re.compile(r"(?:(\d+)km)?N(\d+)E(\d+)", re.I)
+
+
+def parse_grid_id(grd_id: str) -> tuple[float, float, float] | None:
+    """Parse a GEOSTAT/INSPIRE grid id such as ``1kmN2689E4337``.
+
+    Returns ``(easting_m, northing_m, cell_size_m)`` of the cell's lower-left corner.
+    """
+    m = _GRD_RE.search(str(grd_id or ""))
+    if not m:
+        return None
+    size_km = float(m.group(1) or 1)
+    north_km = float(m.group(2))
+    east_km = float(m.group(3))
+    return east_km * 1000.0, north_km * 1000.0, size_km * 1000.0
+
+
 _DMS_RE = re.compile(
     r"^\s*(-?\d+(?:[.,]\d+)?)\s*[º°d]\s*"      # degrees
     r"(?:(\d+(?:[.,]\d+)?)\s*['′m]\s*)?"   # minutes

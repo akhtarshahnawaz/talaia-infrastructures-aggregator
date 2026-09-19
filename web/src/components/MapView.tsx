@@ -1,19 +1,35 @@
 import maplibregl, { Map as MLMap } from "maplibre-gl";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CATEGORY_COLOR, type ExposureReport } from "../api";
 
+// Esri's Dark Gray Canvas: keyless, dark, and the same family of basemap the sponsor's
+// reference stack uses. CARTO's dark_all now watermarks tiles unless an API key is
+// supplied, so it is not usable here.
 const STYLE: any = {
   version: 8,
   sources: {
-    osm: {
+    base: {
       type: "raster",
-      tiles: ["https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png",
-              "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"],
+      tiles: [
+        "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+      ],
       tileSize: 256,
-      attribution: '© OpenStreetMap contributors © CARTO',
+      maxzoom: 16,
+      attribution: "Esri, HERE, Garmin, © OpenStreetMap contributors",
+    },
+    labels: {
+      type: "raster",
+      tiles: [
+        "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}",
+      ],
+      tileSize: 256,
+      maxzoom: 16,
     },
   },
-  layers: [{ id: "osm", type: "raster", source: "osm" }],
+  layers: [
+    { id: "base", type: "raster", source: "base" },
+    { id: "labels", type: "raster", source: "labels" },
+  ],
 };
 
 interface Props {
@@ -28,6 +44,9 @@ interface Props {
 export default function MapView({ drawing, vertices, onVertex, aoi, report }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const map = useRef<MLMap | null>(null);
+  // MapLibre only has sources after its `load` event. Without gating the data effects
+  // on this, the initial AOI is silently dropped because getSource() returns undefined.
+  const [ready, setReady] = useState(false);
   const onVertexRef = useRef(onVertex);
   const drawingRef = useRef(drawing);
   onVertexRef.current = onVertex;
@@ -88,6 +107,7 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
       });
       m.on("mouseenter", "assets-pt", () => { m.getCanvas().style.cursor = "pointer"; });
       m.on("mouseleave", "assets-pt", () => { m.getCanvas().style.cursor = drawingRef.current ? "crosshair" : ""; });
+      setReady(true);
     });
     map.current = m;
     return () => { m.remove(); map.current = null; };
@@ -99,6 +119,7 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
   }, [drawing]);
 
   useEffect(() => {
+    if (!ready) return;
     const m = map.current; const src = m?.getSource("draft") as any; if (!src) return;
     const feats: any[] = vertices.map((c) => ({ type: "Feature", geometry: { type: "Point", coordinates: c }, properties: {} }));
     if (vertices.length >= 2) {
@@ -106,9 +127,10 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
         geometry: { type: "LineString", coordinates: vertices.length >= 3 ? [...vertices, vertices[0]] : vertices } });
     }
     src.setData({ type: "FeatureCollection", features: feats });
-  }, [vertices]);
+  }, [vertices, ready]);
 
   useEffect(() => {
+    if (!ready) return;
     const m = map.current; const src = m?.getSource("aoi") as any; if (!src) return;
     if (!aoi) { src.setData({ type: "FeatureCollection", features: [] }); return; }
     const palette = ["#ef4444", "#f97316", "#facc15", "#38bdf8", "#a78bfa"];
@@ -140,9 +162,10 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
         m!.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 70, duration: 700, maxZoom: 14 });
       }
     } catch {}
-  }, [aoi]);
+  }, [aoi, ready]);
 
   useEffect(() => {
+    if (!ready) return;
     const m = map.current; if (!m) return;
     const asrc = m.getSource("assets") as any;
     const nsrc = m.getSource("nets") as any;
@@ -167,7 +190,7 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
       })),
     });
     nsrc.setData(report.networks?.geojson ?? { type: "FeatureCollection", features: [] });
-  }, [report]);
+  }, [report, ready]);
 
   return <div ref={ref} className="h-full w-full" />;
 }

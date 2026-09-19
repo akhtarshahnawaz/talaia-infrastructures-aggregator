@@ -43,8 +43,8 @@ export default function App() {
               </NavLink>
             ))}
           </nav>
-          <a href="/docs#openapi" className="ml-auto hidden shrink-0 text-sm text-slate-400 hover:text-slate-200 sm:block">
-            OpenAPI ↗
+          <a href="/swagger" className="ml-auto hidden shrink-0 text-sm text-slate-400 hover:text-slate-200 sm:block">
+            Swagger UI ↗
           </a>
         </div>
       </header>

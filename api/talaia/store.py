@@ -455,7 +455,13 @@ class Store:
             "population_cells": _one("SELECT count(*) FROM pop_grid"),
             "cached_tiles": _one("SELECT count(*) FROM osm_tile_cache WHERE status='ok'"),
             "enrichment_entries": _one("SELECT count(*) FROM enrichment_cache"),
-            "sources": _one("SELECT count(DISTINCT source_id) FROM assets"),
+            # Count population-grid sources too: they live in their own table, and a
+            # landing page that says "6 sources" while /v1/sources lists 8 is a bug.
+            "sources": _one(
+                "SELECT count(*) FROM ("
+                "  SELECT DISTINCT source_id FROM assets"
+                "  UNION SELECT DISTINCT source_id FROM networks"
+                "  UNION SELECT DISTINCT source_id FROM pop_grid)"),
             "db_size_mb": round(self.db_path.stat().st_size / 1e6, 2)
             if self.db_path.exists() else 0.0,
         })

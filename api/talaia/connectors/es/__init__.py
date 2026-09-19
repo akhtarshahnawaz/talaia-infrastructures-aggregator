@@ -3,4 +3,5 @@
 
 def load() -> None:
     from . import catalunya  # noqa: F401
+    from . import population  # noqa: F401
     from . import spain  # noqa: F401

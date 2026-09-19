@@ -12,6 +12,7 @@ Two paths, in order of preference:
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -42,16 +43,27 @@ async def population_for(store, aoi, bands) -> PopulationResult:
             boxes, pops = [], []
             for c in cells:
                 try:
-                    geom = shape(__import__("json").loads(c["geojson"]))
+                    geom = shape(json.loads(c["geojson"]))
                 except Exception:
                     continue
                 boxes.append(geom.bounds)
                 pops.append(float(c["population"]))
+
+            # Bands from a spread model are nested: the 6 h perimeter contains the 1 h
+            # one. Overlaying each band as published would report the same residents in
+            # every band, while assets are assigned to the earliest band only - so the
+            # two columns of the report would not add up the same way. Each band is
+            # therefore reduced to the ground it adds over all earlier bands, making
+            # population exclusive and directly comparable with asset counts.
+            seen = None
             for band in bands:
+                exclusive = band.geometry if seen is None else band.geometry.difference(seen)
+                seen = band.geometry if seen is None else seen.union(band.geometry)
                 acc = 0.0
-                for poly in polygon_rings(band.geometry):
-                    fracs = cell_overlap_fractions(boxes, poly, 10)
-                    acc += sum(p * f for p, f in zip(pops, fracs))
+                if not exclusive.is_empty:
+                    for poly in polygon_rings(exclusive):
+                        fracs = cell_overlap_fractions(boxes, poly, 10)
+                        acc += sum(p * f for p, f in zip(pops, fracs))
                 by_band[band.label] = round(min(acc, total), 1)
 
         return PopulationResult(

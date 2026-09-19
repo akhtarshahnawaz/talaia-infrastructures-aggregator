@@ -29,18 +29,25 @@ def _log_scale(value: float, full: float) -> float:
     return min(1.0, math.log10(1 + value) / math.log10(1 + full))
 
 
-def people_estimate(subcategory: str, capacity: dict[str, Any] | None) -> tuple[float, str]:
-    """Best available estimate of people present, with the basis that produced it."""
+def people_estimate(subcategory: str, capacity: dict[str, Any] | None
+                    ) -> tuple[float, str, bool]:
+    """Best available occupancy estimate.
+
+    Returns ``(people, basis, is_default)``. The third value matters: an estimate derived
+    from a class default is a guess, and a total that silently blends registry figures
+    with guesses is not something an incident commander should act on. The report keeps
+    the two apart.
+    """
     spec = get_subcategory(subcategory)
     cap = capacity or {}
     for field, label in (("people", "capacity.people"), ("beds", "registered beds"),
                          ("students", "enrolment"), ("places", "registered places")):
         val = cap.get(field)
         if val:
-            return float(val), cap.get("basis") or label
+            return float(val), cap.get("basis") or label, False
     if spec.people > 0:
-        return spec.people, f"class default for '{spec.label}'"
-    return 0.0, "no occupancy data"
+        return spec.people, f"class default for '{spec.label}' (no registry figure)", True
+    return 0.0, "no occupancy data", False
 
 
 def urgency(band_minutes: float | None, band_index: int | None,

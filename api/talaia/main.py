@@ -83,6 +83,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TALAIA", version="0.1.0", description=DESCRIPTION, lifespan=lifespan,
+    # The website owns /docs; the generated OpenAPI UI lives at /swagger so the two
+    # do not fight over the same path.
+    docs_url="/swagger", redoc_url="/redoc", openapi_url="/openapi.json",
     contact={"name": "TALAIA", "url": "https://github.com/"},
     license_info={"name": "See /v1/sources for per-dataset licences"},
     openapi_tags=[
