@@ -171,6 +171,13 @@ class ExposureRequest(BaseModel):
     sort_by: Literal["priority", "distance", "value", "category"] = "priority"
 
 
+class SignupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    email: str = Field(..., min_length=5, max_length=254)
+    organisation: str | None = Field(None, max_length=120)
+    use_case: str | None = Field(None, max_length=500)
+
+
 class GeocodeRequest(BaseModel):
     query: str
     limit: int = Field(1, ge=1, le=10)

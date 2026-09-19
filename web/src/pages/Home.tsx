@@ -45,6 +45,9 @@ export default function Home() {
           <Link to="/playground" className="rounded-lg bg-ember-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-ember-500">
             Try it on a map →
           </Link>
+          <Link to="/signup" className="rounded-lg border border-ember-700 bg-ember-500/10 px-5 py-2.5 text-sm font-medium text-ember-300 transition hover:border-ember-500">
+            Get a free API key
+          </Link>
           <Link to="/docs" className="rounded-lg border border-slate-700 px-5 py-2.5 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white">
             Read the API docs
           </Link>

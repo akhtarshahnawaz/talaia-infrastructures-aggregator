@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { Code, Note, Section } from "../components/ui";
 
 const ENDPOINTS = [
@@ -8,6 +9,9 @@ const ENDPOINTS = [
   ["GET", "/v1/taxonomy", "The closed vocabulary with per-subcategory scoring parameters."],
   ["GET", "/v1/stats", "What the store currently holds."],
   ["POST", "/v1/geocode", "CartoCiudad passthrough, cached."],
+  ["POST", "/v1/signup", "Self-service: create an account, get a key. Open."],
+  ["GET", "/v1/tiers", "Tier limits. Open."],
+  ["GET", "/v1/me", "Your tier, limits and usage today."],
   ["GET", "/health", "Liveness and row counts. Open."],
   ["POST", "/v1/admin/keys", "Mint an API key. Guarded by X-Admin-Key."],
   ["GET", "/v1/admin/keys", "List keys — prefixes only, never secrets."],
@@ -28,6 +32,63 @@ export default function Docs() {
       </div>
 
       <div className="mt-12 space-y-14">
+        <Section kicker="Access" title="Getting a key, and what each tier allows">
+          <p>
+            Anyone can self-register at <Link to="/signup" className="text-ember-400 hover:text-ember-300">/signup</Link>,
+            or by calling the endpoint directly. The key is returned once.
+          </p>
+          <Code lang="bash">{`curl -X POST $TALAIA/v1/signup -H 'content-type: application/json' \\
+  -d '{"email":"you@org.example","organisation":"Your team"}'`}</Code>
+          <div className="overflow-x-auto rounded-lg border border-slate-800">
+            <table className="w-full text-sm">
+              <thead className="bg-night-850 text-xs uppercase text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">Tier</th>
+                  <th className="px-3 py-2 text-right font-medium">Max area</th>
+                  <th className="px-3 py-2 text-right font-medium">Rate</th>
+                  <th className="px-3 py-2 text-right font-medium">Daily</th>
+                  <th className="px-3 py-2 text-left font-medium">How</th>
+                </tr>
+              </thead>
+              <tbody className="text-slate-400">
+                {[["free", "250 km²", "60/min", "1,000", "Self-service"],
+                  ["standard", "2,500 km²", "300/min", "20,000", "On request"],
+                  ["unlimited", "unlimited", "unlimited", "unlimited", "Admin-minted"]]
+                  .map(([t, a, r, d, h]) => (
+                    <tr key={t} className="border-t border-slate-800/70">
+                      <td className="px-3 py-2 font-medium text-slate-200">{t}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{a}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{d}</td>
+                      <td className="px-3 py-2">{h}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The <strong className="text-slate-200">area cap is the control that matters</strong>.
+            Rate limits only slow an abuser down; one unbounded polygon is a single request
+            that can pull millions of rows and hundreds of map tiles. Area is checked before
+            any work starts — and <code className="text-ember-300">buffer_m</code> counts
+            towards it, so it cannot be used to slip past the limit.
+          </p>
+          <Code lang="json">{`HTTP/1.1 403 Forbidden
+{
+  "detail": "Area of interest is 1,479.7 km², above the 250 km² limit for the
+             'free' tier. Split the request into smaller polygons, or request
+             a higher tier."
+}`}</Code>
+          <Note>
+            Over the limit? Split the perimeter into tiles and call once per tile. The
+            OpenStreetMap tile cache makes adjacent calls nearly free after the first.
+            <code className="mx-1 text-ember-300">GET /v1/me</code> reports your exact
+            limits and today&rsquo;s usage;{" "}
+            <code className="text-ember-300">GET /v1/tiers</code> is public, so a client can
+            size requests before registering.
+          </Note>
+        </Section>
+
         <Section kicker="Authentication" title="Every data call needs a key">
           <p>
             <code className="text-ember-300">/v1/exposure</code>,{" "}

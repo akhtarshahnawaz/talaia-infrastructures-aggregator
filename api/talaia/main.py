@@ -20,7 +20,7 @@ from .config import settings
 from .connectors import registry
 from .net import close_client
 from .auth import registry as key_registry
-from .routers.v1 import (admin_router, meta_router,
+from .routers.v1 import (admin_router, meta_router, public_router,
                          router as v1_router)
 from .store import Store, get_store, set_store
 
@@ -63,6 +63,22 @@ and valuations are parametric estimates, not appraisals.
 """
 
 
+async def _flush_usage_loop(store) -> None:
+    """Persist per-key usage counters on a timer.
+
+    Counters live in memory so quota accounting costs nothing per request; this task is
+    what makes them survive a restart, and the shutdown path flushes once more.
+    """
+    while True:
+        try:
+            await asyncio.sleep(60)
+            await key_registry.flush_usage(store)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover
+            log.warning("usage flush failed: %s", exc)
+
+
 async def _bootstrap(store) -> None:
     """Load every resident-tier connector once, in-process."""
     from .connectors.base import Tier
@@ -97,7 +113,10 @@ async def lifespan(app: FastAPI):
         # empty volume self-heals, serving OSM-only results until the load completes.
         log.warning("store is empty - bootstrapping resident sources in the background")
         app.state.bootstrap_task = asyncio.create_task(_bootstrap(store))
+    flusher = asyncio.create_task(_flush_usage_loop(store))
     yield
+    flusher.cancel()
+    await key_registry.flush_usage(store)
     await close_client()
     store.close()
 
@@ -132,6 +151,9 @@ async def timing_and_request_id(request: Request, call_next):
         response.headers["x-ratelimit-limit"] = str(key.rate_limit_per_min)
         response.headers["x-ratelimit-remaining"] = str(
             getattr(request.state, "rate_remaining", 0))
+        day_left = getattr(request.state, "daily_remaining", -1)
+        if day_left >= 0:
+            response.headers["x-quota-remaining-today"] = str(day_left)
     return response
 
 
@@ -156,6 +178,7 @@ async def health():
 
 app.include_router(v1_router)
 app.include_router(meta_router)
+app.include_router(public_router)
 app.include_router(admin_router)
 
 # -- website ---------------------------------------------------------------

@@ -14,15 +14,20 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ..auth import ApiKey, registry as key_registry, require_admin_key, require_api_key
+from ..auth import (TIERS, ApiKey, get_tier, registry as key_registry,
+                    require_admin_key, require_api_key)
 from ..config import settings
 from ..connectors import registry
-from ..models import (ExposureReport, ExposureRequest, GeocodeRequest, SourceStatus)
+from ..geo import parse_aoi
+from ..models import (ExposureReport, ExposureRequest, GeocodeRequest, SignupRequest,
+                      SourceStatus)
 from ..services.aggregator import build_report
 from ..store import get_store
 from ..taxonomy import as_dict as taxonomy_dict
@@ -30,9 +35,34 @@ from ..taxonomy import as_dict as taxonomy_dict
 log = logging.getLogger("talaia.api")
 
 
-async def _optional_key(request: Request,
-                        key: ApiKey | None = Depends(require_api_key)) -> ApiKey | None:
-    return key
+def _enforce_key_limits(req: ExposureRequest, key: ApiKey | None) -> ExposureRequest:
+    """Apply the caller's tier limits before any expensive work happens.
+
+    Area is checked first and hardest. Rate and quota limits only slow an abuser down,
+    but a single unbounded polygon can pull millions of rows and request hundreds of
+    Overpass tiles in one call - so the area cap is the control that actually protects
+    the service, and it is evaluated before the store is ever touched.
+    """
+    if key is None:
+        return req
+    if not key.unlimited_area:
+        try:
+            aoi = parse_aoi(req.aoi, buffer_metres=req.buffer_m,
+                            band_property=req.band_property,
+                            minutes_property=req.minutes_property)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if aoi.area_km2 > key.max_aoi_km2:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Area of interest is {aoi.area_km2:,.1f} km², above the "
+                    f"{key.max_aoi_km2:,.0f} km² limit for the '{key.tier}' tier. "
+                    f"Split the request into smaller polygons, or request a higher tier."
+                ))
+    if key.max_assets and (req.max_assets is None or req.max_assets > key.max_assets):
+        req = req.model_copy(update={"max_assets": key.max_assets})
+    return req
 
 
 def _metadata_guard():
@@ -42,6 +72,7 @@ def _metadata_guard():
 
 router = APIRouter(prefix="/v1", tags=["exposure"],
                    dependencies=[Depends(require_api_key)])
+public_router = APIRouter(prefix="/v1", tags=["access"])
 meta_router = APIRouter(prefix="/v1", tags=["metadata"],
                         dependencies=_metadata_guard())
 admin_router = APIRouter(prefix="/v1/admin", tags=["admin"],
@@ -53,7 +84,8 @@ admin_router = APIRouter(prefix="/v1/admin", tags=["admin"],
 # ---------------------------------------------------------------------------
 @router.post("/exposure", response_model=ExposureReport,
              summary="Full values-at-risk report for a polygon")
-async def exposure(req: ExposureRequest) -> ExposureReport:
+async def exposure(req: ExposureRequest,
+                   key: ApiKey | None = Depends(require_api_key)) -> ExposureReport:
     """Return everything of value inside the AOI.
 
     Accepts a GeoJSON Geometry, Feature or FeatureCollection. A FeatureCollection whose
@@ -62,6 +94,7 @@ async def exposure(req: ExposureRequest) -> ExposureReport:
 
     **Requires an API key** (`X-API-Key` or `Authorization: Bearer`).
     """
+    req = _enforce_key_limits(req, key)
     try:
         return await build_report(req, get_store())
     except ValueError as exc:
@@ -69,12 +102,15 @@ async def exposure(req: ExposureRequest) -> ExposureReport:
 
 
 @router.post("/exposure/summary", summary="Aggregates only - no asset array")
-async def exposure_summary(req: ExposureRequest) -> dict[str, Any]:
+async def exposure_summary(req: ExposureRequest,
+                           key: ApiKey | None = Depends(require_api_key)
+                           ) -> dict[str, Any]:
     """The decision-relevant numbers without the long asset list.
 
     Intended for an agent loop that polls exposure as a fire evolves and only needs the
     asset detail once something crosses a threshold.
     """
+    req = _enforce_key_limits(req, key)
     req = req.model_copy(update={"include_assets": False, "include_geometry": False})
     try:
         report = await build_report(req, get_store())
@@ -92,8 +128,11 @@ async def exposure_summary(req: ExposureRequest) -> dict[str, Any]:
 
 
 @router.post("/assets", summary="Assets as newline-delimited JSON (streaming)")
-async def assets_stream(req: ExposureRequest) -> StreamingResponse:
+async def assets_stream(req: ExposureRequest,
+                        key: ApiKey | None = Depends(require_api_key)
+                        ) -> StreamingResponse:
     """Stream assets as NDJSON so a large AOI can be consumed incrementally."""
+    req = _enforce_key_limits(req, key)
     try:
         report = await build_report(req, get_store())
     except ValueError as exc:
@@ -119,6 +158,26 @@ async def geocode_endpoint(req: GeocodeRequest) -> dict[str, Any]:
     if not result:
         raise HTTPException(status_code=404, detail="No match for that address")
     return result
+
+
+@router.get("/me", summary="What your key is allowed to do")
+async def me(key: ApiKey | None = Depends(require_api_key)) -> dict[str, Any]:
+    """Your tier, limits and usage so far today.
+
+    Worth calling before a large job: it tells you the maximum area you may request in a
+    single call, so you can split a big AOI client-side instead of discovering the limit
+    through a 403.
+    """
+    if key is None:
+        return {"authenticated": False, "note": "Authentication is disabled."}
+    used = key_registry.used_today(key)
+    return {
+        "authenticated": True,
+        "prefix": key.prefix, "label": key.label, "tier": key.tier,
+        "limits": key.limits(),
+        "usage_today": used,
+        "daily_remaining": (key.daily_quota - used) if key.daily_quota else "unlimited",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +220,110 @@ async def stats() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Public - self-service access
+# ---------------------------------------------------------------------------
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+\.[^@\s]{2,}$")
+
+
+def _client_ip(request: Request) -> str:
+    """Real client address behind Railway's proxy.
+
+    The first entry of X-Forwarded-For is the originating client; later entries are
+    proxies. Falling back to request.client would see only the proxy and make the
+    per-IP signup limit meaningless.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@public_router.get("/tiers", summary="Access tiers and their limits")
+async def tiers() -> dict[str, Any]:
+    """What each tier allows. Published so a caller can size requests before signing up."""
+    return {
+        "signup_enabled": settings.allow_signup,
+        "signup_tier": settings.signup_tier,
+        "tiers": [
+            {"name": t.name, "description": t.description,
+             "rate_limit_per_min": t.rate_limit_per_min or "unlimited",
+             "daily_quota": t.daily_quota or "unlimited",
+             "max_aoi_km2": t.max_aoi_km2 or "unlimited",
+             "max_assets": t.max_assets,
+             "self_service": t.name == settings.signup_tier}
+            for t in TIERS.values()
+        ],
+    }
+
+
+@public_router.post("/signup", summary="Create an account and receive an API key")
+async def signup(req: SignupRequest, request: Request) -> dict[str, Any]:
+    """Self-service access.
+
+    Issues a free-tier key immediately. Abuse controls: one active key per email address,
+    a per-IP daily signup cap, and the tier's own area, rate and quota limits.
+
+    **The key is returned once and cannot be recovered** - only its hash is stored.
+    """
+    if not settings.allow_signup:
+        raise HTTPException(
+            status_code=403,
+            detail="Self-service signup is disabled on this deployment. "
+                   "Contact the operator for a key.")
+
+    email = req.email.strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="That does not look like an email address.")
+
+    store = get_store()
+    ip = _client_ip(request)
+
+    existing = await store.fetch(
+        "SELECT prefix FROM api_keys WHERE email = ? AND revoked_at IS NULL", [email])
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"An active key already exists for {email} (prefix "
+                    f"{existing[0][0]}). Keys cannot be re-displayed, so ask the "
+                    f"operator to revoke it if you need a new one."))
+
+    recent = await store.fetch(
+        "SELECT count(*) FROM signups WHERE ip = ? AND created_at > "
+        "(current_timestamp - INTERVAL 24 HOUR)", [ip])
+    if recent and recent[0][0] >= settings.signups_per_ip_per_day:
+        raise HTTPException(
+            status_code=429,
+            detail=(f"This address has already created "
+                    f"{settings.signups_per_ip_per_day} keys in the last 24 hours."),
+            headers={"Retry-After": "3600"})
+
+    label = (req.organisation or email.split("@")[0])[:64]
+    raw, record = await key_registry.create(
+        store, label=label, tier=settings.signup_tier, email=email,
+        organisation=req.organisation, created_ip=ip)
+    await store.execute_write(
+        "INSERT INTO signups (id, email, organisation, ip, created_at, key_prefix) "
+        "VALUES (?, ?, ?, ?, current_timestamp, ?)",
+        [uuid.uuid4().hex, email, req.organisation, ip, record.prefix])
+    log.info("signup: %s tier=%s from %s", record.prefix, record.tier, ip)
+
+    spec = get_tier(record.tier)
+    return {
+        "api_key": raw,
+        "prefix": record.prefix,
+        "tier": record.tier,
+        "limits": record.limits(),
+        "tier_description": spec.description,
+        "usage": {
+            "header": "X-API-Key: <your key>",
+            "alternative": "Authorization: Bearer <your key>",
+            "check_limits": "GET /v1/me",
+        },
+        "warning": "Store this key now. It is hashed on arrival and cannot be shown again.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Admin - key management
 # ---------------------------------------------------------------------------
 @admin_router.post("/keys", summary="Mint a new API key")
@@ -168,12 +331,22 @@ async def create_key(payload: dict[str, Any]) -> dict[str, Any]:
     """Create a key. **The secret is returned once and cannot be recovered afterwards**,
     because only its hash is stored."""
     label = str(payload.get("label") or "unnamed")[:64]
+    tier = str(payload.get("tier") or "standard")
+    if tier not in TIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown tier {tier!r}. Available: {', '.join(TIERS)}.")
     limit = payload.get("rate_limit_per_min")
+    area = payload.get("max_aoi_km2")
+    quota = payload.get("daily_quota")
     raw, record = await key_registry.create(
-        get_store(), label=label,
-        rate_limit_per_min=int(limit) if limit else None)
+        get_store(), label=label, tier=tier,
+        rate_limit_per_min=int(limit) if limit is not None else None,
+        max_aoi_km2=float(area) if area is not None else None,
+        daily_quota=int(quota) if quota is not None else None,
+        email=payload.get("email"), organisation=payload.get("organisation"))
     return {"api_key": raw, "prefix": record.prefix, "label": record.label,
-            "rate_limit_per_min": record.rate_limit_per_min,
+            "tier": record.tier, "limits": record.limits(),
             "warning": "Store this now. It is not recoverable."}
 
 

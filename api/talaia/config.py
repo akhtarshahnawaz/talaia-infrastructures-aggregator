@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # exposure data, and the public documentation site renders them. They stay open by
     # default; set this to false to gate absolutely everything.
     public_metadata: bool = True
+    # Self-service signup. Issues a free-tier key; disable to make the service invite-only.
+    allow_signup: bool = True
+    signups_per_ip_per_day: int = 3
+    signup_tier: str = "free"
 
     # --- server ----------------------------------------------------------
     cors_origins: str = "*"

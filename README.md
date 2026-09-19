@@ -102,11 +102,52 @@ occupancy, replacement cost, a triage score and per-field provenance.
 | `GET` | `/v1/taxonomy` | 17 categories, 116 subcategories, scoring parameters |
 | `GET` | `/v1/stats` · `/health` | Store contents, liveness |
 | `POST` | `/v1/geocode` | CartoCiudad passthrough, cached |
+| `POST` | `/v1/signup` | Self-service: create an account, receive a key. Open |
+| `GET` | `/v1/tiers` | Tier limits. Open |
+| `GET` | `/v1/me` | Your tier, limits and usage today |
 | `POST`/`GET`/`DELETE` | `/v1/admin/keys` | Mint, list and revoke API keys |
 
 ---
 
-## Authentication
+## Access and authentication
+
+### Getting a key
+
+Anyone can self-register at `/signup` on the website, or:
+
+```bash
+curl -X POST $TALAIA/v1/signup -H 'content-type: application/json' \
+  -d '{"email":"you@org.example","organisation":"Your team"}'
+```
+
+The key is returned **once** and issued on the `free` tier. Abuse controls: one active
+key per email address, a per-IP daily signup cap, and the tier limits below. Set
+`TALAIA_ALLOW_SIGNUP=false` to make the deployment invite-only.
+
+### Tiers
+
+| Tier | Max area per call | Rate | Daily | Assets/call | How to get it |
+|---|---|---|---|---|---|
+| `free` | **250 km²** | 60/min | 1,000 | 2,000 | Self-service signup |
+| `standard` | 2,500 km² | 300/min | 20,000 | 20,000 | On request |
+| `unlimited` | unlimited | unlimited | unlimited | 50,000 | Admin-minted, for your own integration |
+
+**The area cap is the control that matters.** Rate limits only slow an abuser down; a
+single unbounded polygon is one request that can pull millions of rows and hundreds of
+Overpass tiles. Area is therefore checked *before any work starts* — including the
+`buffer_m` expansion, so it cannot be used to sneak past the cap. Over the limit returns
+`403` naming your area and your allowance. `GET /v1/me` reports your limits and usage, and
+`GET /v1/tiers` is public so a client can size requests before registering.
+
+Mint yourself an unrestricted key:
+
+```bash
+curl -X POST $TALAIA/v1/admin/keys -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' \
+  -d '{"label":"deepfire-integration","tier":"unlimited"}'
+```
+
+### Sending the key
 
 Data endpoints — `/v1/exposure`, `/v1/exposure/summary`, `/v1/assets`, `/v1/geocode` —
 require an API key. Send it as either header:
@@ -262,16 +303,20 @@ live data rather than the documentation:
 
 ## Deployment
 
-Single Railway service: multi-stage Dockerfile (Rust → Node → Python) serving the API and
-the website from one process. Mount a volume at `/data`; an empty store self-bootstraps
-in-process on boot (DuckDB is single-writer, so a separate ingest process would be locked
-out).
+**→ [Step-by-step Railway guide](docs/DEPLOY-RAILWAY.md)** — volume setup, variables,
+capturing the bootstrap key, minting your unlimited key, verification and troubleshooting.
+
+Single service: a multi-stage Dockerfile (Rust → Node → Python) serves the API and the
+website from one process. Mount a volume at `/data`; an empty store self-bootstraps
+in-process on boot, because DuckDB is single-writer and a separate ingest process would be
+locked out.
 
 ```bash
-docker build -t talaia . && docker run -p 8000:8000 -v talaia-data:/data talaia
+docker build -t talaia . && docker run -p 8000:8000 -v talaia-data:/data \
+  -e TALAIA_ADMIN_KEY=... talaia
 ```
 
-See `.env.example` for configuration.
+See `.env.example` for the full configuration surface.
 
 ---
 

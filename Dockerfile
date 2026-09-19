@@ -5,14 +5,20 @@
 # If this stage fails the wheel is simply absent and the app falls back to the
 # NumPy implementation, so the deploy degrades in performance, not availability.
 # ---------------------------------------------------------------------------
-FROM rust:1.82-slim-bookworm AS rust-builder
+# Built on the same Python base as the runtime. The crate targets abi3-py311 so the
+# resulting wheel is interpreter-independent, but keeping the bases aligned removes
+# the whole class of "wheel silently not installed" failures.
+FROM python:3.12-slim-bookworm AS rust-builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-dev python3-pip python3-venv \
+        curl build-essential \
     && rm -rf /var/lib/apt/lists/*
-RUN python3 -m venv /opt/maturin && /opt/maturin/bin/pip install --no-cache-dir "maturin>=1.7,<2.0"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain 1.82.0 --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN pip install --no-cache-dir "maturin>=1.7,<2.0"
 COPY core/ /build/core/
-RUN cd core && /opt/maturin/bin/maturin build --release --out /build/wheels || \
+RUN cd core && maturin build --release --out /build/wheels || \
     (echo "WARNING: Rust core build failed; the NumPy fallback will be used." && \
      mkdir -p /build/wheels)
 
@@ -21,8 +27,9 @@ RUN cd core && /opt/maturin/bin/maturin build --release --out /build/wheels || \
 # ---------------------------------------------------------------------------
 FROM node:22-slim AS web-builder
 WORKDIR /web
-COPY web/package.json web/package-lock.json* ./
-RUN npm install --no-audit --no-fund
+COPY web/package.json web/package-lock.json ./
+# `npm ci` installs exactly the lockfile, so the deployed bundle matches what was tested.
+RUN npm ci --no-audit --no-fund
 COPY web/ ./
 RUN npm run build
 

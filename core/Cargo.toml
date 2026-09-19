@@ -8,7 +8,11 @@ name = "talaia_core"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.22", features = ["extension-module"] }
+# abi3-py311 builds one wheel that works on CPython 3.11 and every later version.
+# Without it the wheel is tagged for the exact interpreter that built it, so the
+# Docker builder's Python and the runtime's Python must match exactly - a silent
+# trap that makes the Rust core vanish into the NumPy fallback on deploy.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
 rayon = "1.10"
 
 [profile.release]

@@ -115,11 +115,37 @@ CREATE TABLE IF NOT EXISTS api_keys (
     key_hash           VARCHAR PRIMARY KEY,
     prefix             VARCHAR,
     label              VARCHAR,
+    tier               VARCHAR DEFAULT 'free',
     rate_limit_per_min INTEGER DEFAULT 120,
+    daily_quota        INTEGER DEFAULT 0,
+    max_aoi_km2        DOUBLE  DEFAULT 0,
+    max_assets         INTEGER DEFAULT 20000,
+    email              VARCHAR,
+    organisation       VARCHAR,
+    created_ip         VARCHAR,
     created_at         TIMESTAMP,
     revoked_at         TIMESTAMP,
     last_used_at       TIMESTAMP,
     request_count      BIGINT DEFAULT 0
+);
+
+-- Daily usage, flushed from memory periodically. Writing on every request would
+-- serialise the whole service behind DuckDB's single writer.
+CREATE TABLE IF NOT EXISTS key_usage (
+    key_hash VARCHAR,
+    day      DATE,
+    requests BIGINT DEFAULT 0,
+    PRIMARY KEY (key_hash, day)
+);
+
+-- Signup throttling by client address, so one actor cannot mint keys in bulk.
+CREATE TABLE IF NOT EXISTS signups (
+    id           VARCHAR PRIMARY KEY,
+    email        VARCHAR,
+    organisation VARCHAR,
+    ip           VARCHAR,
+    created_at   TIMESTAMP,
+    key_prefix   VARCHAR
 );
 
 CREATE INDEX IF NOT EXISTS assets_geom_idx   ON assets   USING RTREE (geom);

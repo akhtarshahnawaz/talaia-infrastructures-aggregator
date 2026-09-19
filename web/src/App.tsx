@@ -4,6 +4,7 @@ import Playground from "./pages/Playground";
 import Docs from "./pages/Docs";
 import Sources from "./pages/Sources";
 import Methodology from "./pages/Methodology";
+import Signup from "./pages/Signup";
 
 const LINKS = [
   ["/", "Overview"],
@@ -11,6 +12,7 @@ const LINKS = [
   ["/docs", "API docs"],
   ["/sources", "Data sources"],
   ["/methodology", "Methodology"],
+  ["/signup", "Get a key"],
 ] as const;
 
 function Watchtower({ className = "" }: { className?: string }) {
@@ -56,6 +58,7 @@ export default function App() {
           <Route path="/docs" element={<Docs />} />
           <Route path="/sources" element={<Sources />} />
           <Route path="/methodology" element={<Methodology />} />
+          <Route path="/signup" element={<Signup />} />
           <Route path="*" element={<Home />} />
         </Routes>
       </main>

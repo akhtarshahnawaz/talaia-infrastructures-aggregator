@@ -66,6 +66,7 @@ class Store:
         self._con.execute(f"SET memory_limit='{settings.duckdb_memory_limit}'")
         self._con.execute(f"SET threads={settings.duckdb_threads}")
         self._apply_schema()
+        self._migrate()
         self._warm_indexes()
         log.info("store ready at %s", self.db_path)
 
@@ -83,6 +84,26 @@ class Store:
                 self._con.execute(stmt)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("schema statement failed: %s -- %s", stmt[:70], exc)
+
+    # Columns added after the first release. CREATE TABLE IF NOT EXISTS will not add a
+    # column to a table that already exists, so an upgraded deployment with a mounted
+    # volume needs these applied explicitly. Each is idempotent and failure-tolerant.
+    _MIGRATIONS: list[str] = [
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS tier VARCHAR DEFAULT 'free'",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS daily_quota INTEGER DEFAULT 0",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS max_aoi_km2 DOUBLE DEFAULT 0",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS max_assets INTEGER DEFAULT 20000",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS email VARCHAR",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS organisation VARCHAR",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS created_ip VARCHAR",
+    ]
+
+    def _migrate(self) -> None:
+        for stmt in self._MIGRATIONS:
+            try:
+                self._con.execute(stmt)
+            except Exception as exc:  # pragma: no cover - already applied
+                log.debug("migration skipped (%s): %s", stmt[:48], exc)
 
     def _warm_indexes(self) -> None:
         """Touch each R-tree once at boot.

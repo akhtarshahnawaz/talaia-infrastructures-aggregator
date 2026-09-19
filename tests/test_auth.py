@@ -123,3 +123,119 @@ async def test_admin_rejects_a_wrong_key(monkeypatch):
         await require_admin_key(x_admin_key="wrong-admin")
     assert exc.value.status_code == 401
     assert await require_admin_key(x_admin_key="correct-admin") is True
+
+
+# ---------------------------------------------------------------------------
+# Tiers, quotas and the area cap
+# ---------------------------------------------------------------------------
+from talaia.auth import TIERS, get_tier  # noqa: E402
+from talaia.models import ExposureRequest  # noqa: E402
+from talaia.routers.v1 import _enforce_key_limits  # noqa: E402
+
+BIG = {"type": "Polygon", "coordinates": [[[1.0, 41.0], [2.5, 41.0], [2.5, 42.2],
+                                           [1.0, 42.2], [1.0, 41.0]]]}       # ~19,000 km2
+SMALL = {"type": "Polygon", "coordinates": [[[1.80, 41.70], [1.85, 41.70], [1.85, 41.75],
+                                             [1.80, 41.75], [1.80, 41.70]]]}  # ~23 km2
+
+
+def _key(tier: str) -> ApiKey:
+    spec = get_tier(tier)
+    return ApiKey(key_hash="h", prefix="p", label="l", tier=spec.name,
+                  rate_limit_per_min=spec.rate_limit_per_min,
+                  daily_quota=spec.daily_quota, max_aoi_km2=spec.max_aoi_km2,
+                  max_assets=spec.max_assets)
+
+
+def test_tier_table_is_coherent():
+    free, std, unlimited = TIERS["free"], TIERS["standard"], TIERS["unlimited"]
+    assert free.max_aoi_km2 < std.max_aoi_km2
+    assert unlimited.max_aoi_km2 == 0, "0 means unlimited"
+    assert free.daily_quota < std.daily_quota
+    assert unlimited.daily_quota == 0 and unlimited.rate_limit_per_min == 0
+    assert get_tier("nonsense").name == "free", "unknown tiers fall back to the safest"
+    assert get_tier(None).name == "free"
+
+
+def test_free_tier_is_blocked_above_its_area_limit():
+    with pytest.raises(HTTPException) as exc:
+        _enforce_key_limits(ExposureRequest(aoi=BIG), _key("free"))
+    assert exc.value.status_code == 403
+    assert "above the" in exc.value.detail and "free" in exc.value.detail
+
+
+def test_free_tier_allows_a_small_area():
+    req = _enforce_key_limits(ExposureRequest(aoi=SMALL), _key("free"))
+    assert req.max_assets == TIERS["free"].max_assets
+
+
+def test_unlimited_tier_bypasses_the_area_cap():
+    key = _key("unlimited")
+    assert key.unlimited_area
+    req = _enforce_key_limits(ExposureRequest(aoi=BIG), key)
+    assert req.max_assets == TIERS["unlimited"].max_assets
+
+
+def test_buffer_counts_towards_the_area_limit():
+    """A caller must not be able to inflate the AOI past the cap with buffer_m."""
+    key = _key("free")
+    _enforce_key_limits(ExposureRequest(aoi=SMALL), key)          # fine bare
+    with pytest.raises(HTTPException) as exc:
+        _enforce_key_limits(ExposureRequest(aoi=SMALL, buffer_m=20_000), key)
+    assert exc.value.status_code == 403
+
+
+def test_max_assets_is_clamped_down_never_up():
+    key = _key("free")
+    asked_high = _enforce_key_limits(
+        ExposureRequest(aoi=SMALL, max_assets=50_000), key)
+    assert asked_high.max_assets == TIERS["free"].max_assets
+    asked_low = _enforce_key_limits(ExposureRequest(aoi=SMALL, max_assets=10), key)
+    assert asked_low.max_assets == 10, "a caller may still ask for fewer"
+
+
+def test_no_key_means_no_limits_applied():
+    req = ExposureRequest(aoi=BIG, max_assets=50_000)
+    assert _enforce_key_limits(req, None) is req
+
+
+async def test_created_keys_carry_their_tier_limits(store):
+    reg = KeyRegistry()
+    await store.execute_write(
+        "CREATE TABLE IF NOT EXISTS api_keys (key_hash VARCHAR PRIMARY KEY, "
+        "prefix VARCHAR, label VARCHAR, tier VARCHAR, rate_limit_per_min INTEGER, "
+        "daily_quota INTEGER, max_aoi_km2 DOUBLE, max_assets INTEGER, email VARCHAR, "
+        "organisation VARCHAR, created_ip VARCHAR, created_at TIMESTAMP, "
+        "revoked_at TIMESTAMP, last_used_at TIMESTAMP, request_count BIGINT)")
+    raw_free, free = await reg.create(store, label="signup", tier="free",
+                                      email="a@b.example")
+    raw_unl, unl = await reg.create(store, label="internal", tier="unlimited")
+
+    assert free.max_aoi_km2 == TIERS["free"].max_aoi_km2
+    assert unl.unlimited_area and unl.rate_limit_per_min == 0
+
+    # Limits must survive a reload from storage, not just live in memory.
+    reloaded = KeyRegistry()
+    await reloaded.load(store)
+    again = reloaded.verify(raw_free)
+    assert again is not None and again.tier == "free"
+    assert again.max_aoi_km2 == TIERS["free"].max_aoi_km2
+
+
+async def test_usage_counters_survive_a_restart(store):
+    reg = KeyRegistry()
+    await store.execute_write(
+        "CREATE TABLE IF NOT EXISTS api_keys (key_hash VARCHAR PRIMARY KEY, "
+        "prefix VARCHAR, label VARCHAR, tier VARCHAR, rate_limit_per_min INTEGER, "
+        "daily_quota INTEGER, max_aoi_km2 DOUBLE, max_assets INTEGER, email VARCHAR, "
+        "organisation VARCHAR, created_ip VARCHAR, created_at TIMESTAMP, "
+        "revoked_at TIMESTAMP, last_used_at TIMESTAMP, request_count BIGINT)")
+    raw, record = await reg.create(store, label="quota", tier="free")
+    for _ in range(7):
+        reg.record_use(record)
+    await reg.flush_usage(store)
+
+    restarted = KeyRegistry()
+    await restarted.load(store)
+    key = restarted.verify(raw)
+    assert restarted.used_today(key) == 7, \
+        "a restart must not hand everyone a fresh daily quota"

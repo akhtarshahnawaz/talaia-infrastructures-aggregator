@@ -95,6 +95,22 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface TierInfo {
+  name: string; description: string;
+  rate_limit_per_min: number | string; daily_quota: number | string;
+  max_aoi_km2: number | string; max_assets: number; self_service: boolean;
+}
+export interface SignupResult {
+  api_key: string; prefix: string; tier: string;
+  limits: Record<string, any>; tier_description: string; warning: string;
+}
+
+export const getTiers = () =>
+  req<{ signup_enabled: boolean; signup_tier: string; tiers: TierInfo[] }>("/v1/tiers");
+export const postSignup = (body: { email: string; organisation?: string; use_case?: string }) =>
+  req<SignupResult>("/v1/signup", { method: "POST", body: JSON.stringify(body) });
+export const getMe = () => req<any>("/v1/me");
+
 export const getSources = () => req<SourceStatus[]>("/v1/sources");
 export const getTaxonomy = () => req<any>("/v1/taxonomy");
 export const getStats = () => req<any>("/v1/stats");
