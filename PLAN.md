@@ -183,3 +183,43 @@ health check, background bootstrap on empty DB, `.env.example`.
 4. End-to-end: DeepFire-shaped time-banded FeatureCollection → banded report.
 5. Website build + served + playground round-trip.
 6. Final report of what works, what is partial, and what is stubbed — stated plainly.
+
+---
+
+# Status at end of build
+
+| Module | Status | Evidence / note |
+|---|---|---|
+| M0 Scaffold, taxonomy, models | **done** | 17 categories, 116 subcategories, no orphans, serialisable |
+| M1 Store (DuckDB) | **done** | Adaptive planner verified optimal at every AOI size; durable across restart |
+| M2 Connector framework | **done** | 8 connectors registered through the decorator |
+| M3 Catalonia connectors (6) | **done** | 54 704 rows loaded from live registries |
+| M4 Spain national | **partial** | Population grid done (63 522 cells). **Not built:** Catálogo Nacional de Hospitales bed counts, REGCESS, CSIC care homes, national school registry |
+| M5 OSM tile cache | **done** | Cold tile → 1.9 ms warm; per-tile failure attribution; 25 s deadline |
+| M6 Enrichment | **partial** | CartoCiudad geocoding done (3 889 care homes located). **Not built:** cadastral building geometry / RCCOOR footprints |
+| M7 Conflation | **done** | Calibrated scorer; 3 013 duplicates merged on the demo AOI |
+| M8 Rust core + fallback | **done** | Wheel builds; 4 parity tests pass |
+| M9 Valuation & scoring | **done** | Per-species livestock pricing; confidence decays to ≤0.35 on defaults |
+| M10 Aggregator | **done** | Full lifecycle; degrades to warnings on every upstream failure |
+| M11 API | **done** | 8 endpoints + OpenAPI, all verified 200 |
+| M12 Website | **done** | 5 pages, live playground, sources rendered from the API |
+| M13 Deployment | **partial** | Dockerfile, railway.json and .env.example written. **The image has not been built or deployed** — no Docker daemon was available in the build environment |
+| M14 Verification | **done** | 41 tests; endpoint sweep; latency table; browser walkthrough |
+
+## Known gaps, stated plainly
+
+1. **Spanish national registries beyond the population grid are not implemented.** The
+   conflation source-priority table already contains their ids, and the connector
+   contract is the same, so each is a self-contained addition — but today, outside
+   Catalonia the service returns OpenStreetMap only, and says so via `coverage_regime`.
+2. **No cadastral footprints.** Building areas come from OSM polygons where present
+   (~61 % of OSM assets in the test AOI) and from class defaults otherwise, which caps
+   valuation confidence at 0.35 for the remainder.
+3. **The Docker image is unbuilt and unverified.** It is written from the same commands
+   used successfully here, but it has not been executed.
+4. **The population grid is the 2011 census round.** The 2021 pan-European 1 km grid is
+   not freely downloadable without registration from this environment.
+5. **Overpass was largely unreachable from the build network** (only one mirror
+   responded, intermittently). The multi-mirror pool, per-tile failure attribution and
+   25 s deadline were all built and tested against that reality, but throughput on a
+   healthy network has not been measured.
