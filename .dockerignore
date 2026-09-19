@@ -1,0 +1,11 @@
+.venv/
+data/
+dist/
+core/target/
+web/node_modules/
+web/dist/
+__pycache__/
+*.pyc
+.git/
+scripts/
+tests/

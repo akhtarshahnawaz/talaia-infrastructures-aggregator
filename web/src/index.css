@@ -1,0 +1,42 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ember-50:  #fff7ed;
+  --color-ember-200: #fed7aa;
+  --color-ember-300: #fdba74;
+  --color-ember-400: #fb923c;
+  --color-ember-500: #f97316;
+  --color-ember-600: #ea580c;
+  --color-ember-700: #c2410c;
+  --color-night-700: #1e293b;
+  --color-night-800: #131c2b;
+  --color-night-850: #0f1725;
+  --color-night-900: #0a111c;
+  --color-night-950: #060b13;
+}
+
+html { scroll-behavior: smooth; }
+body {
+  background-color: var(--color-night-950);
+  color: #e2e8f0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; }
+
+.maplibregl-popup-content {
+  background: #0f1725; color: #e2e8f0; border: 1px solid #334155;
+  border-radius: 8px; font-size: 12px; padding: 10px 12px;
+}
+.maplibregl-popup-tip { border-top-color: #0f1725 !important; }
+.maplibregl-ctrl-group { background: #131c2b !important; border: 1px solid #334155; }
+.maplibregl-ctrl-group button + button { border-top: 1px solid #334155; }
+.maplibregl-ctrl-icon { filter: invert(1) hue-rotate(180deg); }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a111c; }
+::-webkit-scrollbar-thumb { background: #27364d; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #3b4c6b; }
+
+@keyframes shimmer { 0% { opacity: .45 } 50% { opacity: 1 } 100% { opacity: .45 } }
+.animate-shimmer { animation: shimmer 1.4s ease-in-out infinite; }
