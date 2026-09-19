@@ -134,7 +134,8 @@ the tier limits below.
 
 Sending mail takes one variable — `TALAIA_RESEND_API_KEY` — and no server to run. Any
 SMTP provider works too, via `TALAIA_SMTP_*`. With no sender configured, signup returns
-`503` rather than quietly issuing unverified keys. Set `TALAIA_ALLOW_SIGNUP=false` for an
+`503` rather than quietly issuing unverified keys.
+**Setup: [docs/EMAIL-SETUP.md](docs/EMAIL-SETUP.md).** Set `TALAIA_ALLOW_SIGNUP=false` for an
 invite-only deployment, or `TALAIA_REQUIRE_EMAIL_VERIFICATION=false` to go back to
 immediate issuance.
 
@@ -455,7 +456,8 @@ capturing the bootstrap key, minting your unlimited key, verification and troubl
 **→ [Full API reference](docs/API.md)** — every endpoint, every field, what each number
 means and how each estimate was made. Written to be read end to end by an agent.
 
-Related: **[LIMITS-AND-KEYS.md](docs/LIMITS-AND-KEYS.md)** (tiers, quotas, issuing keys) ·
+Related: **[EMAIL-SETUP.md](docs/EMAIL-SETUP.md)** (Resend and SMTP) ·
+**[LIMITS-AND-KEYS.md](docs/LIMITS-AND-KEYS.md)** (tiers, quotas, issuing keys) ·
 **[PRECACHING.md](docs/PRECACHING.md)** (warming a demo region) ·
 **[MCP.md](docs/MCP.md)** (agent access).
 

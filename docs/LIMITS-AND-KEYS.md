@@ -143,6 +143,8 @@ creates nothing; the key is issued and shown once when the link is followed, and
 emailed. With verification on and no mail sender configured, signup fails closed with a
 503 — falling back to unverified issuance would undo the control while looking fine.
 
+Configuring a sender: **[EMAIL-SETUP.md](EMAIL-SETUP.md)** covers Resend and SMTP.
+
 Check the sender before opening signup: `GET /v1/admin/email` reports the active backend,
 and `POST /v1/admin/email/test` with `{"to": "you@example.com"}` sends a real message and
 returns the provider's own error if it fails.

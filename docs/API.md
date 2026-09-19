@@ -115,6 +115,8 @@ previous one.
 That last one is deliberate: falling back to issuing an unverified key would silently undo
 verification while the operator believed addresses were being checked.
 
+Operators: see [EMAIL-SETUP.md](EMAIL-SETUP.md) for configuring the sender.
+
 An operator can set `TALAIA_REQUIRE_EMAIL_VERIFICATION=false`, in which case `/v1/signup`
 returns a key immediately with `email_verified: false` and a `note` saying the address was
 never confirmed.

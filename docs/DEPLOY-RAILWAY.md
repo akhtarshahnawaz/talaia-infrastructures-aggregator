@@ -99,15 +99,11 @@ TALAIA_ADMIN_KEY=<the secret you generated in step 0>
 TALAIA_ALLOW_SIGNUP=true
 TALAIA_SIGNUPS_PER_IP_PER_DAY=3
 
-# Signup is email-verified, so it needs a sender and a public URL for the link.
-# Without a sender, /v1/signup returns 503 and issues nothing.
-# Two variables is the whole setup - Resend is HTTPS, so Railway's block on outbound
-# port 25 is irrelevant and there is no SMTP server to run.
+# Signup is email-verified and needs a sender. Set up in step 9 - listed here so the
+# whole variable set is in one place. Without a sender, /v1/signup returns 503.
 TALAIA_PUBLIC_URL=https://<your-app>.up.railway.app
 TALAIA_RESEND_API_KEY=re_xxxxxxxxxxxxxxxx
-
-# Optional until you open signup to the public: without it, mail goes out as Resend's
-# shared onboarding@resend.dev, which only delivers to the account owner's address.
+# Required before anyone but you can sign up - see step 9.
 # TALAIA_EMAIL_FROM=TALAIA <noreply@your-domain.example>
 
 # Overpass is a volunteer service; more than one mirror is not optional.
@@ -251,7 +247,88 @@ curl -X DELETE "$TALAIA/v1/admin/keys/talaia_sk_XK7kHK..." -H "X-Admin-Key: $ADM
 
 ---
 
-## 9. Verify the deployment
+## 9. Set up email — required before anyone can sign up
+
+Signup is email-verified: `POST /v1/signup` mails a single-use link and creates nothing
+until it is followed. With no sender configured it returns `503` and issues no key, which
+is deliberate — falling back to unverified keys would undo the control while looking fine.
+
+**→ Full guide: [EMAIL-SETUP.md](EMAIL-SETUP.md).** The short version:
+
+### Resend — two variables, no server
+
+HTTPS, so Railway's block on outbound port 25 never comes into it.
+
+1. [resend.com](https://resend.com) → **API Keys** → **Create API Key** (sending access is
+   enough). Copy the `re_…` value; it is shown once.
+2. In Railway → **Variables**:
+
+   ```bash
+   TALAIA_RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxx
+   TALAIA_PUBLIC_URL=https://<your-app>.up.railway.app
+   ```
+
+`TALAIA_PUBLIC_URL` is the one people skip. It builds the link inside the email, and
+behind Railway's proxy the request's own host is the internal one — a link built from that
+reaches nobody.
+
+### Then verify a domain, before you tell anyone about the service
+
+Without `TALAIA_EMAIL_FROM`, mail is sent as Resend's shared `onboarding@resend.dev`, and
+**Resend delivers that only to the address owning your Resend account**. Your own test
+arrives, so it looks like it works, while every other signup fails silently.
+
+Resend → **Domains** → **Add Domain**, add the `MX` and `TXT` records it shows at your DNS
+provider (Cloudflare users: **DNS only**, grey cloud), click **Verify**, then set:
+
+```bash
+TALAIA_EMAIL_FROM=TALAIA <noreply@yourdomain.com>
+```
+
+### Or SMTP, if you already have a provider
+
+```bash
+TALAIA_SMTP_HOST=smtp.sendgrid.net
+TALAIA_SMTP_PORT=587
+TALAIA_SMTP_USER=apikey
+TALAIA_SMTP_PASSWORD=<your key>
+TALAIA_SMTP_STARTTLS=true
+TALAIA_EMAIL_FROM=TALAIA <noreply@yourdomain.com>
+TALAIA_PUBLIC_URL=https://<your-app>.up.railway.app
+```
+
+Port 587 with STARTTLS, or 465 with `TALAIA_SMTP_SSL=true`. **Port 25 is blocked on
+Railway** — it will time out. If `TALAIA_RESEND_API_KEY` is also set, Resend wins; unset it
+to use SMTP. Per-provider settings are in [EMAIL-SETUP.md](EMAIL-SETUP.md#3-option-b--smtp).
+
+### Check it now, not later
+
+```bash
+curl -s $TALAIA/v1/admin/email -H "X-Admin-Key: $ADMIN"          # what is configured
+curl -X POST $TALAIA/v1/admin/email/test -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' -d '{"to":"you@example.com"}'
+```
+
+You want `"sent": true` and `"using_shared_sender": false`. A failure returns the
+provider's own message, which is usually the whole diagnosis:
+
+```jsonc
+{ "sent": false, "error": "RuntimeError: Resend returned 403: The yourdomain.com domain
+                           is not verified. Please verify your domain on
+                           https://resend.com/domains" }
+```
+
+The boot log also states the active backend, and warns when signup is open while
+verification is off or unsendable.
+
+> **Running a closed deployment?** Set `TALAIA_ALLOW_SIGNUP=false` and skip this step
+> entirely — mint keys with the admin API instead. Do not use
+> `TALAIA_REQUIRE_EMAIL_VERIFICATION=false` to dodge it on a public URL: that hands a key
+> to anyone who types any address.
+
+---
+
+## 10. Verify the deployment
 
 ```bash
 export KEY=<your unlimited key>
@@ -283,7 +360,7 @@ should issue a key, and `/playground` should run a query once you paste one in.
 
 ---
 
-## 10. Custom domain (optional)
+## 11. Custom domain (optional)
 
 Settings → **Networking → Custom Domain** → enter `talaia.yourdomain.org`, then add the
 `CNAME` Railway shows you at your DNS provider. TLS is issued automatically. If you set
@@ -315,32 +392,21 @@ store, or adding an authenticated admin re-ingest endpoint that runs in-process.
 OpenStreetMap needs no maintenance: tiles refresh themselves when their 14-day TTL
 expires.
 
-### Checking that mail actually works
+### Mail, after the first setup
 
-Do this once, before anyone tries to sign up. The first person to discover a broken
-sender should not be a user whose confirmation never arrives.
+Configured in [step 9](#9-set-up-email--required-before-anyone-can-sign-up) and covered in
+full by [EMAIL-SETUP.md](EMAIL-SETUP.md). Worth re-running after any change to the sender,
+the domain's DNS, or the provider account:
 
 ```bash
-curl -s $TALAIA/v1/admin/email -H "X-Admin-Key: $ADMIN"          # what is configured
+curl -s $TALAIA/v1/admin/email -H "X-Admin-Key: $ADMIN"
 curl -X POST $TALAIA/v1/admin/email/test -H "X-Admin-Key: $ADMIN" \
   -H 'content-type: application/json' -d '{"to":"you@example.com"}'
 ```
 
-The test endpoint returns the provider's own error, which is usually the whole
-diagnosis:
-
-```jsonc
-{ "sent": false, "backend": "resend",
-  "error": "RuntimeError: Resend returned 403: The your-domain.example domain is not
-            verified. Please verify your domain on https://resend.com/domains" }
-```
-
-**The failure to expect:** with no `TALAIA_EMAIL_FROM`, mail is sent as Resend's shared
-`onboarding@resend.dev`, and Resend delivers that **only to the address that owns your
-Resend account**. Your own test will arrive and everyone else's signup will fail. Verify
-a domain at resend.com/domains, then set `TALAIA_EMAIL_FROM` to an address on it. The
-boot log warns while you are in that state, and `GET /v1/admin/email` reports
-`using_shared_sender: true`.
+A provider key can be revoked, and a domain's DNS can be edited by someone who does not
+know it is load-bearing. Neither shows up anywhere until a signup fails, so this is worth
+checking whenever signups go quiet.
 
 ### Warming the tile cache on a live deployment
 
@@ -408,6 +474,20 @@ scale, implement the PostGIS backend behind the existing `Store` interface.
 
 ---
 
+### Email
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `503` on `/v1/signup` | No sender configured | Step 9. A misspelled variable is silently ignored. |
+| Your test arrives, nobody else's does | Resend's shared sender only reaches the account owner | Verify a domain, set `TALAIA_EMAIL_FROM` |
+| `403 … domain is not verified` | `TALAIA_EMAIL_FROM` is on an unverified domain | Verify it, or clear the variable |
+| SMTP times out | Port 25, which Railway blocks | 587 + STARTTLS, or 465 + `TALAIA_SMTP_SSL=true` |
+| Link in the email 404s | `TALAIA_PUBLIC_URL` wrong or unset | Public URL, no trailing slash |
+
+More in [EMAIL-SETUP.md](EMAIL-SETUP.md#6-troubleshooting).
+
+---
+
 ## Security checklist before you share the URL
 
 - [ ] `TALAIA_REQUIRE_AUTH=true`
@@ -415,6 +495,10 @@ scale, implement the PostGIS backend behind the existing `Store` interface.
 - [ ] Bootstrap key captured, or deliberately discarded after minting your own
 - [ ] Your unlimited key is in your project's env, never in client-side code
 - [ ] `TALAIA_ALLOW_SIGNUP` reflects what you actually want
+- [ ] If signup is open: a mail sender is configured and `POST /v1/admin/email/test` returns `sent: true`
+- [ ] `using_shared_sender` is `false` — otherwise only you can ever register
+- [ ] `TALAIA_REQUIRE_EMAIL_VERIFICATION` is `true` on any public URL
+- [ ] `TALAIA_EMAIL_CONSOLE` is **not** set — it returns a working verification link to every caller
 - [ ] `TALAIA_CORS_ORIGINS` narrowed if a browser app will call this
 - [ ] Volume attached at `/data` — keys and data both live there
 - [ ] Verified a keyless request returns 401
