@@ -93,6 +93,28 @@ class Settings(BaseSettings):
     allow_signup: bool = True
     signups_per_ip_per_day: int = 3
     signup_tier: str = "free"
+    # Email verification. On by default: without it the address on a key is an unchecked
+    # string, so there is no way to reach the holder and no cost to registering under
+    # someone else's name. Turning it off is a deliberate choice for a closed deployment.
+    require_email_verification: bool = True
+    verification_ttl_hours: int = 24
+    # Absolute base URL used to build the verification link. Behind Railway's proxy the
+    # request's own host header is not reliably the public one.
+    public_url: str = ""
+
+    # --- outbound email ----------------------------------------------------
+    # Setting smtp_host selects the SMTP backend. With nothing configured, signup
+    # returns 503 rather than silently issuing unverified keys.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_starttls: bool = True
+    smtp_ssl: bool = False
+    smtp_timeout_s: float = 20.0
+    email_from: str = ""
+    # Development only: log the message instead of sending it.
+    email_console: bool = False
 
     # --- server ----------------------------------------------------------
     cors_origins: str = "*"

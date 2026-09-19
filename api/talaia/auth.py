@@ -366,12 +366,12 @@ class KeyRegistry:
     async def list_keys(self, store) -> list[dict]:
         rows = await store.fetch(
             "SELECT prefix, label, tier, email, created_at, revoked_at, request_count, "
-            "custom_limits FROM api_keys ORDER BY created_at DESC")
+            "custom_limits, email_verified FROM api_keys ORDER BY created_at DESC")
         # Report the limits actually in force, which for an uncustomised key means the
         # current tier definition rather than the columns written at creation time.
         live_by_prefix = {k.prefix: k for k in self._by_hash.values()}
         out = []
-        for p, lbl, tier, email, created, revoked, count, custom in rows:
+        for p, lbl, tier, email, created, revoked, count, custom, verified in rows:
             live = live_by_prefix.get(p)
             spec = get_tier(tier)
             out.append({
@@ -381,7 +381,7 @@ class KeyRegistry:
                 "daily_quota": live.daily_quota if live else spec.daily_quota,
                 "max_aoi_km2": live.max_aoi_km2 if live else spec.max_aoi_km2,
                 "custom_limits": bool(custom),
-                "email": email, "created_at": created, "revoked_at": revoked,
+                "email": email, "email_verified": bool(verified), "created_at": created, "revoked_at": revoked,
                 "request_count": count, "source": "store",
                 "used_today": self.used_today_by_prefix(p)})
         for key in self._by_hash.values():
@@ -390,7 +390,7 @@ class KeyRegistry:
                             "rate_limit_per_min": key.rate_limit_per_min,
                             "daily_quota": key.daily_quota,
                             "max_aoi_km2": key.max_aoi_km2, "custom_limits": False,
-                            "email": None,
+                            "email": None, "email_verified": False,
                             "created_at": None, "revoked_at": None,
                             "request_count": None, "source": "env",
                             "used_today": self.used_today(key)})

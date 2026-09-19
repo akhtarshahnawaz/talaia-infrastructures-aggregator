@@ -7,6 +7,7 @@ import Methodology from "./pages/Methodology";
 import Signup from "./pages/Signup";
 import Mcp from "./pages/Mcp";
 import Roadmap from "./pages/Roadmap";
+import Verify from "./pages/Verify";
 
 const LINKS = [
   ["/", "Overview"],
@@ -65,6 +66,7 @@ export default function App() {
           <Route path="/agents" element={<Mcp />} />
           <Route path="/roadmap" element={<Roadmap />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/verify" element={<Verify />} />
           <Route path="*" element={<Home />} />
         </Routes>
       </main>

@@ -184,6 +184,12 @@ class SignupRequest(BaseModel):
     use_case: str | None = Field(None, max_length=500)
 
 
+class VerifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(..., min_length=8, max_length=256,
+                       description="The single-use token from the confirmation email")
+
+
 class GeocodeRequest(BaseModel):
     query: str
     limit: int = Field(1, ge=1, le=10)

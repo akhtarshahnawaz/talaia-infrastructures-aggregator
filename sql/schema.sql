@@ -130,7 +130,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at         TIMESTAMP,
     revoked_at         TIMESTAMP,
     last_used_at       TIMESTAMP,
-    request_count      BIGINT DEFAULT 0
+    request_count      BIGINT DEFAULT 0,
+    -- Whether the address was confirmed by following a mailed link. Keys issued before
+    -- verification existed, and those minted by an admin or from the environment, are
+    -- not retroactively marked as verified.
+    email_verified     BOOLEAN DEFAULT FALSE
 );
 
 -- Daily usage, flushed from memory periodically. Writing on every request would
@@ -140,6 +144,20 @@ CREATE TABLE IF NOT EXISTS key_usage (
     day      DATE,
     requests BIGINT DEFAULT 0,
     PRIMARY KEY (key_hash, day)
+);
+
+-- Signups awaiting email confirmation. Only a hash of the token is stored, for the
+-- same reason as API keys: a leaked database must not hand anyone a working link.
+-- Rows are kept after use so a consumed token cannot be replayed.
+CREATE TABLE IF NOT EXISTS pending_signups (
+    token_hash   VARCHAR PRIMARY KEY,
+    email        VARCHAR NOT NULL,
+    organisation VARCHAR,
+    use_case     VARCHAR,
+    ip           VARCHAR,
+    created_at   TIMESTAMP,
+    expires_at   TIMESTAMP,
+    consumed_at  TIMESTAMP
 );
 
 -- Signup throttling by client address, so one actor cannot mint keys in bulk.

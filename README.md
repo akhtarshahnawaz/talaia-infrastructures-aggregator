@@ -124,9 +124,16 @@ curl -X POST $TALAIA/v1/signup -H 'content-type: application/json' \
   -d '{"email":"you@org.example","organisation":"Your team"}'
 ```
 
-The key is returned **once** and issued on the `free` tier. Abuse controls: one active
-key per email address, a per-IP daily signup cap, and the tier limits below. Set
-`TALAIA_ALLOW_SIGNUP=false` to make the deployment invite-only.
+**Signup is email-verified.** That call creates nothing — it mails a single-use link and
+returns `202`. Following the link issues the key and shows it **once**. The key is never
+emailed: email is not a confidential channel, and a credential sent there sits in an inbox
+indefinitely.
+
+Abuse controls: a confirmed address, one active key per address, a per-IP daily cap, and
+the tier limits below. Needs an SMTP sender configured — with none, signup returns `503`
+rather than quietly issuing unverified keys. Set `TALAIA_ALLOW_SIGNUP=false` for an
+invite-only deployment, or `TALAIA_REQUIRE_EMAIL_VERIFICATION=false` to go back to
+immediate issuance.
 
 ### Tiers
 

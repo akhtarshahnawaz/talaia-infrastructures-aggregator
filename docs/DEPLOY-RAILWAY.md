@@ -99,6 +99,16 @@ TALAIA_ADMIN_KEY=<the secret you generated in step 0>
 TALAIA_ALLOW_SIGNUP=true
 TALAIA_SIGNUPS_PER_IP_PER_DAY=3
 
+# Signup is email-verified, so it needs a sender and a public URL for the link.
+# Without a sender, /v1/signup returns 503 and issues nothing. Railway blocks outbound
+# port 25; use a provider's submission port (587) or its API-over-SMTP bridge.
+TALAIA_PUBLIC_URL=https://<your-app>.up.railway.app
+TALAIA_SMTP_HOST=smtp.resend.com
+TALAIA_SMTP_PORT=587
+TALAIA_SMTP_USER=resend
+TALAIA_SMTP_PASSWORD=<your provider token>
+TALAIA_EMAIL_FROM=TALAIA <noreply@your-domain.example>
+
 # Overpass is a volunteer service; more than one mirror is not optional.
 TALAIA_OVERPASS_MIRRORS=https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter
 

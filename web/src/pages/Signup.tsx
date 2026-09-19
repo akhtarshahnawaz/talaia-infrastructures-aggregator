@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, Code, Note, Pill } from "../components/ui";
-import { getTiers, num, postSignup, setApiKey, type SignupResult, type TierInfo } from "../api";
+import { getTiers, num, postSignup, setApiKey, type SignupPending, type SignupResult, type TierInfo } from "../api";
 
 const fmt = (v: number | string) =>
   typeof v === "number" ? num(v) : String(v);
@@ -13,6 +13,7 @@ export default function Signup() {
   const [org, setOrg] = useState("");
   const [useCase, setUseCase] = useState("");
   const [result, setResult] = useState<SignupResult | null>(null);
+  const [pending, setPending] = useState<SignupPending | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -31,8 +32,13 @@ export default function Signup() {
         organisation: org.trim() || undefined,
         use_case: useCase.trim() || undefined,
       });
-      setResult(r);
-      setApiKey(r.api_key);   // so the playground works immediately
+      if ("api_key" in r) {
+        // Only when the operator has turned verification off.
+        setResult(r);
+        setApiKey(r.api_key);
+      } else {
+        setPending(r);
+      }
     } catch (err: any) {
       setError(err.message ?? String(err));
     } finally { setBusy(false); }
@@ -42,11 +48,41 @@ export default function Signup() {
     <div className="mx-auto max-w-4xl px-5 py-10">
       <h1 className="text-3xl font-semibold text-slate-100">Get an API key</h1>
       <p className="mt-3 max-w-2xl text-slate-400">
-        Free, immediate, no approval step. The key is issued once and stored only as a
-        hash, so it cannot be shown to you again — copy it when it appears.
+        Free, no approval step. We send a confirmation link to your address and the key
+        appears once you follow it — it is issued once and stored only as a hash, so it
+        cannot be shown to you again.
       </p>
 
-      {result ? (
+      {pending ? (
+        <Card className="mt-8 border-ember-800 bg-ember-500/[0.04] p-6">
+          <div className="text-sm font-medium text-ember-300">Check your email</div>
+          <p className="mt-2 text-[15px] leading-relaxed text-slate-300">{pending.message}</p>
+          <p className="mt-3 text-sm text-slate-400">
+            No key exists yet. Following the link is what creates it, which is how we know
+            the address belongs to you. The key is shown on that page rather than emailed
+            — email is not a safe place to send a credential.
+          </p>
+          {pending.verification_link && (
+            <div className="mt-4">
+              <Note kind="warn">
+                This deployment is logging email instead of sending it (development mode),
+                so the link is shown here:
+              </Note>
+              <div className="mt-2">
+                <Code lang="text">{pending.verification_link}</Code>
+              </div>
+            </div>
+          )}
+          <p className="mt-4 text-sm text-slate-500">
+            Nothing arrived? Check spam, then{" "}
+            <button onClick={() => setPending(null)}
+              className="text-ember-400 underline-offset-2 hover:text-ember-300 hover:underline">
+              try again
+            </button>{" "}
+            — requesting a new link replaces the old one.
+          </p>
+        </Card>
+      ) : result ? (
         <Card className="mt-8 border-emerald-800 bg-emerald-500/[0.04] p-6">
           <div className="text-sm font-medium text-emerald-300">Your API key</div>
           <div className="mt-3 flex flex-wrap items-center gap-2">

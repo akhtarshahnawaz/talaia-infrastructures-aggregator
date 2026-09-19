@@ -97,6 +97,7 @@ class Store:
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS organisation VARCHAR",
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS created_ip VARCHAR",
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS custom_limits BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT FALSE",
     ]
 
     def _migrate(self) -> None:

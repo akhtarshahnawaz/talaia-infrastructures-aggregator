@@ -131,6 +131,19 @@ Or offline: `python -m talaia key update talaia_sk_abc123... --tier standard`
 | `TALAIA_ALLOW_SIGNUP` | `true` | `false` makes the service invite-only; `/v1/signup` returns 403 |
 | `TALAIA_SIGNUPS_PER_IP_PER_DAY` | `3` | Per-address cap on new keys |
 | `TALAIA_SIGNUP_TIER` | `free` | Tier handed to self-service signups |
+| `TALAIA_REQUIRE_EMAIL_VERIFICATION` | `true` | No key until a mailed link is followed |
+| `TALAIA_VERIFICATION_TTL_HOURS` | `24` | How long a confirmation link lives |
+| `TALAIA_PUBLIC_URL` | — | Base URL for the link. **Set this on Railway** — the request's own host is the internal one. |
+| `TALAIA_SMTP_HOST` … | — | Mail sender. Without one, signup returns 503. |
+
+**Verification is required by default.** `POST /v1/signup` mails a single-use link and
+creates nothing; the key is issued and shown once when the link is followed, and is never
+emailed. With verification on and no mail sender configured, signup fails closed with a
+503 — falling back to unverified issuance would undo the control while looking fine.
+
+Keys minted by an admin, by the CLI, or from `TALAIA_API_KEYS` are not marked verified,
+because nobody confirmed an address for them. `GET /v1/admin/keys` shows `email_verified`
+per key.
 
 Also enforced: one active key per email address. Behind Railway's proxy the client
 address is taken from the first `X-Forwarded-For` entry.

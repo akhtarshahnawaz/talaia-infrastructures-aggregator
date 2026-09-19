@@ -101,14 +101,29 @@ export interface TierInfo {
   max_aoi_km2: number | string; max_assets: number; self_service: boolean;
 }
 export interface SignupResult {
-  api_key: string; prefix: string; tier: string;
+  api_key: string; prefix: string; tier: string; email?: string;
+  email_verified?: boolean;
   limits: Record<string, any>; tier_description: string; warning: string;
+  note?: string;
+}
+
+/** Signup no longer returns a key — it returns "we have emailed you a link". */
+export interface SignupPending {
+  status: "verification_sent";
+  email: string;
+  expires_in_hours: number;
+  message: string;
+  /** Present only with the console mail backend, i.e. local development. */
+  verification_link?: string;
 }
 
 export const getTiers = () =>
   req<{ signup_enabled: boolean; signup_tier: string; tiers: TierInfo[] }>("/v1/tiers");
 export const postSignup = (body: { email: string; organisation?: string; use_case?: string }) =>
-  req<SignupResult>("/v1/signup", { method: "POST", body: JSON.stringify(body) });
+  req<SignupPending | SignupResult>("/v1/signup",
+    { method: "POST", body: JSON.stringify(body) });
+export const postVerify = (token: string) =>
+  req<SignupResult>("/v1/verify", { method: "POST", body: JSON.stringify({ token }) });
 export const getMe = () => req<any>("/v1/me");
 
 export const getSources = () => req<SourceStatus[]>("/v1/sources");

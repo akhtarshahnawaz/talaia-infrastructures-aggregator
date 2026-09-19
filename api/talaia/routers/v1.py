@@ -15,20 +15,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ..auth import (TIERS, ApiKey, get_tier, registry as key_registry,
-                    require_admin_key, require_api_key)
+from ..auth import (TIERS, ApiKey, get_tier, hash_key,
+                    registry as key_registry, require_admin_key, require_api_key)
 from ..config import settings
 from ..connectors import registry
 from ..geo import parse_aoi
 from ..models import (ExposureReport, ExposureRequest, GeocodeRequest, SignupRequest,
-                      SourceStatus)
+                      SourceStatus, VerifyRequest)
 from ..regions import REGIONS, catalogue as region_catalogue, resolve_many
 from ..services.aggregator import build_report
 from ..store import get_store
@@ -368,27 +369,67 @@ async def tiers() -> dict[str, Any]:
     }
 
 
-@public_router.post("/signup", summary="Create an account and receive an API key")
-async def signup(req: SignupRequest, request: Request) -> dict[str, Any]:
-    """Self-service access.
+def _public_base(request: Request) -> str:
+    """Absolute base URL for links we put in an email.
 
-    Issues a free-tier key immediately. Abuse controls: one active key per email address,
-    a per-IP daily signup cap, and the tier's own area, rate and quota limits.
-
-    **The key is returned once and cannot be recovered** - only its hash is stored.
+    Behind a proxy the request's own host is the internal one, so an explicit
+    TALAIA_PUBLIC_URL wins. The forwarded headers are the fallback, and the raw request
+    URL the last resort - a wrong link here means a verification mail nobody can use.
     """
+    if settings.public_url:
+        return settings.public_url.rstrip("/")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    if host:
+        return f"{proto}://{host}"
+    return str(request.base_url).rstrip("/")
+
+
+async def _issue_key(store, *, email: str, organisation: str | None, ip: str | None,
+                     verified: bool) -> dict[str, Any]:
+    """Mint the free-tier key and return the one-time payload."""
+    label = (organisation or email.split("@")[0])[:64]
+    raw, record = await key_registry.create(
+        store, label=label, tier=settings.signup_tier, email=email,
+        organisation=organisation, created_ip=ip)
+    if verified:
+        await store.execute_write(
+            "UPDATE api_keys SET email_verified = TRUE WHERE key_hash = ?",
+            [record.key_hash])
+    await store.execute_write(
+        "INSERT INTO signups (id, email, organisation, ip, created_at, key_prefix) "
+        "VALUES (?, ?, ?, ?, current_timestamp, ?)",
+        [uuid.uuid4().hex, email, organisation, ip, record.prefix])
+    log.info("key issued: %s tier=%s verified=%s", record.prefix, record.tier, verified)
+
+    spec = get_tier(record.tier)
+    return {
+        "api_key": raw,
+        "prefix": record.prefix,
+        "tier": record.tier,
+        "email": email,
+        "email_verified": verified,
+        "limits": record.limits(),
+        "tier_description": spec.description,
+        "usage": {
+            "header": "X-API-Key: <your key>",
+            "alternative": "Authorization: Bearer <your key>",
+            "check_limits": "GET /v1/me",
+        },
+        "warning": "Store this key now. It is hashed on arrival and cannot be shown again.",
+    }
+
+
+async def _signup_guards(store, email: str, ip: str) -> None:
+    """Checks that apply before anything is created or any mail is sent."""
     if not settings.allow_signup:
         raise HTTPException(
             status_code=403,
             detail="Self-service signup is disabled on this deployment. "
                    "Contact the operator for a key.")
-
-    email = req.email.strip().lower()
     if not _EMAIL_RE.match(email):
-        raise HTTPException(status_code=422, detail="That does not look like an email address.")
-
-    store = get_store()
-    ip = _client_ip(request)
+        raise HTTPException(status_code=422,
+                            detail="That does not look like an email address.")
 
     existing = await store.fetch(
         "SELECT prefix FROM api_keys WHERE email = ? AND revoked_at IS NULL", [email])
@@ -409,30 +450,129 @@ async def signup(req: SignupRequest, request: Request) -> dict[str, Any]:
                     f"{settings.signups_per_ip_per_day} keys in the last 24 hours."),
             headers={"Retry-After": "3600"})
 
-    label = (req.organisation or email.split("@")[0])[:64]
-    raw, record = await key_registry.create(
-        store, label=label, tier=settings.signup_tier, email=email,
-        organisation=req.organisation, created_ip=ip)
-    await store.execute_write(
-        "INSERT INTO signups (id, email, organisation, ip, created_at, key_prefix) "
-        "VALUES (?, ?, ?, ?, current_timestamp, ?)",
-        [uuid.uuid4().hex, email, req.organisation, ip, record.prefix])
-    log.info("signup: %s tier=%s from %s", record.prefix, record.tier, ip)
 
-    spec = get_tier(record.tier)
-    return {
-        "api_key": raw,
-        "prefix": record.prefix,
-        "tier": record.tier,
-        "limits": record.limits(),
-        "tier_description": spec.description,
-        "usage": {
-            "header": "X-API-Key: <your key>",
-            "alternative": "Authorization: Bearer <your key>",
-            "check_limits": "GET /v1/me",
-        },
-        "warning": "Store this key now. It is hashed on arrival and cannot be shown again.",
+@public_router.post("/signup", status_code=202,
+                    summary="Request an API key; confirm by email")
+async def signup(req: SignupRequest, request: Request) -> dict[str, Any]:
+    """Start self-service access.
+
+    Sends a single-use confirmation link to the address given. **No key exists until that
+    link is followed**, so an address nobody controls produces nothing.
+
+    The key is shown on the confirmation page rather than mailed: email is not a
+    confidential channel, and a credential sent by mail sits in an inbox indefinitely.
+
+    Abuse controls: a confirmed address is required, one active key per address, a per-IP
+    daily cap, and the tier's own area, rate and quota limits.
+    """
+    from .. import mailer
+
+    email = req.email.strip().lower()
+    store = get_store()
+    ip = _client_ip(request)
+    await _signup_guards(store, email, ip)
+
+    if not settings.require_email_verification:
+        # Explicitly disabled by the operator - issue immediately, and say plainly in the
+        # response that the address was never checked.
+        payload = await _issue_key(store, email=email, organisation=req.organisation,
+                                   ip=ip, verified=False)
+        payload["note"] = ("Email verification is disabled on this deployment; this "
+                           "address was not confirmed.")
+        return payload
+
+    if not mailer.available():
+        # Falling back to issuing a key here would silently undo verification, which is
+        # worse than refusing: the operator would believe addresses were being checked.
+        log.error("signup attempted with no mail backend configured")
+        raise HTTPException(
+            status_code=503,
+            detail=("Email verification is required but this deployment has no mail "
+                    "sender configured, so no key can be issued. Contact the operator."))
+
+    token = secrets.token_urlsafe(32)
+    ttl = max(1, settings.verification_ttl_hours)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    # Supersede any earlier unconsumed request for this address, so the most recent mail
+    # is the one that works and an old link cannot be used later.
+    await store.execute_write(
+        "UPDATE pending_signups SET expires_at = ? "
+        "WHERE email = ? AND consumed_at IS NULL", [now, email])
+    await store.execute_write(
+        "INSERT OR REPLACE INTO pending_signups "
+        "(token_hash, email, organisation, use_case, ip, created_at, expires_at, "
+        " consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+        [hash_key(token), email, req.organisation, req.use_case, ip, now,
+         now + timedelta(hours=ttl)])
+
+    link = f"{_public_base(request)}/verify?token={token}"
+    subject, text, html = mailer.verification_message(link, ttl)
+    sent = await mailer.send(email, subject, text, html)
+    if not sent:
+        raise HTTPException(
+            status_code=503,
+            detail=("Could not send the confirmation email just now. No key was "
+                    "created. Please try again shortly."))
+
+    log.info("verification sent to %s from %s", email, ip)
+    payload: dict[str, Any] = {
+        "status": "verification_sent",
+        "email": email,
+        "expires_in_hours": ttl,
+        "message": (f"Check {email} for a confirmation link. It works once and expires "
+                    f"in {ttl} hours. Your key is shown after you follow it."),
     }
+    if settings.email_console:
+        # Console backend is local development only, where nothing was actually sent.
+        payload["verification_link"] = link
+    return payload
+
+
+@public_router.post("/verify", summary="Confirm an email and receive the key")
+async def verify(req: VerifyRequest, request: Request) -> dict[str, Any]:
+    """Exchange a confirmation token for the API key. Single use.
+
+    The key is returned once, here, and only its hash is stored afterwards.
+    """
+    store = get_store()
+    token = (req.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=422, detail="A token is required.")
+
+    rows = await store.fetch(
+        "SELECT email, organisation, ip, expires_at, consumed_at FROM pending_signups "
+        "WHERE token_hash = ?", [hash_key(token)])
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail="That confirmation link is not valid. Request a new one at /signup.")
+
+    email, organisation, ip, expires_at, consumed_at = rows[0]
+    if consumed_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=("That link has already been used. A key was issued and shown once; "
+                    "ask the operator to revoke it if you need another."))
+    if expires_at is not None and expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
+        raise HTTPException(
+            status_code=410,
+            detail="That confirmation link has expired. Request a new one at /signup.")
+
+    # Re-run the guards: time passed between the request and the click, and an address
+    # may have been given a key by another route in between.
+    await _signup_guards(store, email, ip or _client_ip(request))
+    # Consume before issuing, so a double click cannot produce two keys.
+    await store.execute_write(
+        "UPDATE pending_signups SET consumed_at = ? WHERE token_hash = ?",
+        [datetime.now(timezone.utc).replace(tzinfo=None), hash_key(token)])
+    return await _issue_key(store, email=email, organisation=organisation, ip=ip,
+                            verified=True)
+
+
+@public_router.get("/verify", summary="Confirm an email and receive the key")
+async def verify_get(token: str, request: Request) -> dict[str, Any]:
+    """Same as the POST form, for following the link straight from a mail client."""
+    return await verify(VerifyRequest(token=token), request)
 
 
 # ---------------------------------------------------------------------------

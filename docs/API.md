@@ -78,6 +78,47 @@ at creation, and cannot be recovered.
 
 Get one at `POST /v1/signup` (self-service, free tier) or from the operator.
 
+### Getting a key: two steps
+
+Signup is **email-verified**. `POST /v1/signup` creates nothing — it mails a single-use
+link and returns `202`:
+
+```jsonc
+{ "status": "verification_sent", "email": "you@org.example",
+  "expires_in_hours": 24,
+  "message": "Check you@org.example for a confirmation link. …" }
+```
+
+Following that link calls `GET /v1/verify?token=…` (or `POST /v1/verify` with
+`{"token": "…"}`), which issues the key and returns it **once**:
+
+```jsonc
+{ "api_key": "talaia_sk_…", "prefix": "talaia_sk_bVIuVQ...",
+  "tier": "free", "email_verified": true, "limits": { … },
+  "warning": "Store this key now. It is hashed on arrival and cannot be shown again." }
+```
+
+The key is shown on that page and is **never emailed** — email is not a confidential
+channel, and a credential mailed to someone sits in their inbox indefinitely. Only a hash
+of the token is stored, the token works once, and requesting a new link invalidates the
+previous one.
+
+| Status | Meaning |
+|---|---|
+| `202` | Link sent. No key exists yet. |
+| `409` | That address already has an active key, or that link was already used |
+| `410` | The link expired — request a new one |
+| `404` | The token is not valid |
+| `429` | Per-IP daily signup cap reached |
+| `503` | Verification is required but this deployment has no mail sender, so no key can be issued |
+
+That last one is deliberate: falling back to issuing an unverified key would silently undo
+verification while the operator believed addresses were being checked.
+
+An operator can set `TALAIA_REQUIRE_EMAIL_VERIFICATION=false`, in which case `/v1/signup`
+returns a key immediately with `email_verified: false` and a `note` saying the address was
+never confirmed.
+
 ### Tiers
 
 | Tier | Area per call | Rate | Daily | Assets per call |
@@ -124,7 +165,8 @@ X-Response-Time-Ms: 812.4
 | `GET` | `/v1/stats` | open¹ | Store contents, by source and category |
 | `GET` | `/v1/tiers` | open | Tier limits |
 | `GET` | `/v1/regions` · `/v1/coverage` | open¹ | Warmable regions, and what is cached |
-| `POST` | `/v1/signup` | open | Create an account, receive a key |
+| `POST` | `/v1/signup` | open | Request a key; sends a confirmation email |
+| `GET`/`POST` | `/v1/verify` | open | Exchange the emailed token for the key, once |
 | `GET` | `/health` | open | Liveness and row counts |
 | `*` | `/v1/admin/*` | admin key | Key management and cache warming |
 
