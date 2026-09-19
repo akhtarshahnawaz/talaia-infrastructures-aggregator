@@ -376,3 +376,138 @@ async def test_an_unreachable_server_is_reported_not_raised(monkeypatch):
     monkeypatch.setattr(settings, "smtp_starttls", False)
     monkeypatch.setattr(settings, "smtp_timeout_s", 2.0)
     assert await mailer.send("a@example.com", "s", "t") is False
+
+
+# -- Resend backend ----------------------------------------------------------
+class _ResendMock:
+    """Stands in for api.resend.com, matching its real request and error contract."""
+
+    def __init__(self, status=200, body=None):
+        self.status, self.body = status, body or {"id": "re_msg_123"}
+        self.received: list[dict] = []
+        self.headers: list[dict] = []
+        self._server = None
+
+    async def start(self):
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        port = self._server.sockets[0].getsockname()[1]
+        return f"http://127.0.0.1:{port}/emails"
+
+    async def _handle(self, reader, writer):
+        import json as _json
+
+        head = await reader.readuntil(b"\r\n\r\n")
+        lines = head.decode().split("\r\n")
+        hdrs = dict(
+            ln.split(":", 1)[0].lower().strip() == ln.split(":", 1)[0].lower().strip()
+            and (ln.split(":", 1)[0].lower().strip(), ln.split(":", 1)[1].strip())
+            for ln in lines[1:] if ":" in ln)
+        self.headers.append(hdrs)
+        length = int(hdrs.get("content-length", 0))
+        raw = await reader.readexactly(length) if length else b"{}"
+        self.received.append(_json.loads(raw))
+        payload = _json.dumps(self.body).encode()
+        writer.write(f"HTTP/1.1 {self.status} X\r\nContent-Type: application/json\r\n"
+                     f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n"
+                     .encode() + payload)
+        await writer.drain()
+        writer.close()
+
+    async def stop(self):
+        self._server.close()
+        await self._server.wait_closed()
+
+
+@pytest.fixture
+def resend(monkeypatch):
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "email_console", False)
+    monkeypatch.setattr(settings, "resend_api_key", "re_test_key")
+    monkeypatch.setattr(settings, "email_from", "")
+    return monkeypatch
+
+
+async def test_a_resend_key_alone_is_enough_to_send(resend):
+    """The whole point: one environment variable and no server to run."""
+    mock = _ResendMock()
+    resend.setattr(settings, "resend_api_url", await mock.start())
+    assert mailer.backend() == "resend" and mailer.available() is True
+
+    subject, text, html = mailer.verification_message(
+        "https://talaia.example/verify?token=abc123", 24)
+    try:
+        assert await mailer.send("someone@example.com", subject, text, html) is True
+    finally:
+        await mock.stop()
+
+    body = mock.received[0]
+    assert body["to"] == ["someone@example.com"]
+    assert body["subject"] == subject
+    assert "abc123" in body["text"] and "abc123" in body["html"]
+    assert "talaia_sk_" not in body["text"] + body["html"]
+    assert mock.headers[0]["authorization"] == "Bearer re_test_key"
+    assert mailer.last_error() is None
+
+
+async def test_resend_outranks_smtp_when_both_are_set(resend):
+    resend.setattr(settings, "smtp_host", "smtp.example.com")
+    assert mailer.backend() == "resend", "the explicit API key is the deliberate choice"
+
+
+async def test_the_shared_sender_is_used_and_flagged(resend):
+    assert mailer.using_shared_sender() is True
+    assert "resend.dev" in mailer._from_address()
+
+    resend.setattr(settings, "email_from", "TALAIA <noreply@talaia.example>")
+    assert mailer.using_shared_sender() is False
+    assert mailer._from_address() == "TALAIA <noreply@talaia.example>"
+
+
+async def test_an_unverified_domain_reports_resends_own_words(resend):
+    """This is the failure everyone hits first, and the provider's message is the
+    whole diagnosis - paraphrasing it would cost the operator the answer."""
+    mock = _ResendMock(status=403, body={
+        "statusCode": 403, "name": "validation_error",
+        "message": "The talaia.example domain is not verified. Please verify your "
+                   "domain on https://resend.com/domains"})
+    resend.setattr(settings, "resend_api_url", await mock.start())
+    try:
+        assert await mailer.send("a@example.com", "s", "t") is False
+    finally:
+        await mock.stop()
+    assert "not verified" in mailer.last_error()
+    assert "403" in mailer.last_error()
+
+
+async def test_a_bad_api_key_is_reported_not_raised(resend):
+    mock = _ResendMock(status=401, body={"message": "API key is invalid"})
+    resend.setattr(settings, "resend_api_url", await mock.start())
+    try:
+        assert await mailer.send("a@example.com", "s", "t") is False
+    finally:
+        await mock.stop()
+    assert "invalid" in mailer.last_error().lower()
+
+
+async def test_signup_over_resend_end_to_end(store, resend):
+    mock = _ResendMock()
+    resend.setattr(settings, "resend_api_url", await mock.start())
+    try:
+        out = await signup(SignupRequest(email="real@example.com"), _Request())
+        assert out["status"] == "verification_sent"
+        assert (await store.fetch("SELECT count(*) FROM api_keys"))[0][0] == 0
+
+        token = _token(mock.received[0]["text"])
+        result = await verify(VerifyRequest(token=token), _Request())
+    finally:
+        await mock.stop()
+    assert result["api_key"].startswith("talaia_sk_")
+    assert result["email_verified"] is True
+
+
+async def test_a_resend_outage_creates_no_key(store, resend):
+    resend.setattr(settings, "resend_api_url", "http://127.0.0.1:9/emails")
+    with pytest.raises(HTTPException) as exc:
+        await signup(SignupRequest(email="a@example.com"), _Request())
+    assert exc.value.status_code == 503
+    assert (await store.fetch("SELECT count(*) FROM api_keys"))[0][0] == 0

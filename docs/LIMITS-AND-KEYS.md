@@ -134,12 +134,18 @@ Or offline: `python -m talaia key update talaia_sk_abc123... --tier standard`
 | `TALAIA_REQUIRE_EMAIL_VERIFICATION` | `true` | No key until a mailed link is followed |
 | `TALAIA_VERIFICATION_TTL_HOURS` | `24` | How long a confirmation link lives |
 | `TALAIA_PUBLIC_URL` | — | Base URL for the link. **Set this on Railway** — the request's own host is the internal one. |
-| `TALAIA_SMTP_HOST` … | — | Mail sender. Without one, signup returns 503. |
+| `TALAIA_RESEND_API_KEY` | — | **Simplest mail sender** — one value, no server. Without any sender, signup returns 503. |
+| `TALAIA_EMAIL_FROM` | — | Sender address. Unset with Resend means the shared `onboarding@resend.dev`, which only reaches the account owner. |
+| `TALAIA_SMTP_HOST` … | — | Alternative sender, used only when no Resend key is set. |
 
 **Verification is required by default.** `POST /v1/signup` mails a single-use link and
 creates nothing; the key is issued and shown once when the link is followed, and is never
 emailed. With verification on and no mail sender configured, signup fails closed with a
 503 — falling back to unverified issuance would undo the control while looking fine.
+
+Check the sender before opening signup: `GET /v1/admin/email` reports the active backend,
+and `POST /v1/admin/email/test` with `{"to": "you@example.com"}` sends a real message and
+returns the provider's own error if it fails.
 
 Keys minted by an admin, by the CLI, or from `TALAIA_API_KEYS` are not marked verified,
 because nobody confirmed an address for them. `GET /v1/admin/keys` shows `email_verified`

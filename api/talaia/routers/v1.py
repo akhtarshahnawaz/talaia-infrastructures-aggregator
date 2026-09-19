@@ -631,6 +631,66 @@ async def update_key(prefix: str, payload: dict[str, Any]) -> dict[str, Any]:
     return {"prefix": record.prefix, "tier": record.tier, "limits": record.limits()}
 
 
+@admin_router.get("/email", summary="What the mail sender is configured to do")
+async def email_status() -> dict[str, Any]:
+    """Report the active backend without sending anything."""
+    from .. import mailer
+
+    return {
+        "backend": mailer.backend(),
+        "available": mailer.available(),
+        "from": mailer._from_address() if mailer.available() else None,
+        "using_shared_sender": mailer.using_shared_sender(),
+        "verification_required": settings.require_email_verification,
+        "last_error": mailer.last_error(),
+        "note": (
+            "Sending as Resend's shared onboarding address. It needs no DNS setup, but "
+            "Resend will only deliver to the address that owns the account - everyone "
+            "else's signup will fail. Verify a domain and set TALAIA_EMAIL_FROM before "
+            "opening signup to the public."
+            if mailer.using_shared_sender() else None),
+    }
+
+
+@admin_router.post("/email/test", summary="Send a test email and report what happened")
+async def email_test(payload: dict[str, Any]) -> dict[str, Any]:
+    """Send a real message to an address you control.
+
+    Returns the provider's own error when it fails, which is the whole diagnosis for the
+    usual case - an unverified sender domain. Worth running once after configuring mail
+    and before opening signup, because otherwise the first person to find out is a user
+    whose confirmation never arrives.
+    """
+    from .. import mailer
+
+    to = str(payload.get("to") or "").strip()
+    if not to or not _EMAIL_RE.match(to):
+        raise HTTPException(status_code=422,
+                            detail="Give 'to': an address you can check.")
+    if not mailer.available():
+        raise HTTPException(
+            status_code=503,
+            detail="No mail backend configured. Set TALAIA_RESEND_API_KEY "
+                   "(simplest) or the TALAIA_SMTP_* variables.")
+
+    sent = await mailer.send(
+        to, "TALAIA mail test",
+        "This is a test from your TALAIA deployment.\n\n"
+        "If you are reading it, verification emails will reach this address.\n")
+    return {
+        "sent": sent,
+        "backend": mailer.backend(),
+        "from": mailer._from_address(),
+        "to": to,
+        "error": mailer.last_error(),
+        "hint": (
+            "Resend only delivers to the account owner's address until a domain is "
+            "verified. Verify one at resend.com/domains, then set TALAIA_EMAIL_FROM to "
+            "an address on it."
+            if not sent and mailer.backend() == "resend" else None),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Admin - cache warming
 # ---------------------------------------------------------------------------

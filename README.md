@@ -130,8 +130,11 @@ emailed: email is not a confidential channel, and a credential sent there sits i
 indefinitely.
 
 Abuse controls: a confirmed address, one active key per address, a per-IP daily cap, and
-the tier limits below. Needs an SMTP sender configured — with none, signup returns `503`
-rather than quietly issuing unverified keys. Set `TALAIA_ALLOW_SIGNUP=false` for an
+the tier limits below.
+
+Sending mail takes one variable — `TALAIA_RESEND_API_KEY` — and no server to run. Any
+SMTP provider works too, via `TALAIA_SMTP_*`. With no sender configured, signup returns
+`503` rather than quietly issuing unverified keys. Set `TALAIA_ALLOW_SIGNUP=false` for an
 invite-only deployment, or `TALAIA_REQUIRE_EMAIL_VERIFICATION=false` to go back to
 immediate issuance.
 

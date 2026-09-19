@@ -126,6 +126,22 @@ async def lifespan(app: FastAPI):
     else:
         log.warning("authentication DISABLED - every endpoint is open "
                     "(set TALAIA_REQUIRE_AUTH=true to gate the API)")
+    if settings.allow_signup:
+        from . import mailer
+        if not settings.require_email_verification:
+            log.warning("signup is OPEN and email verification is DISABLED - addresses "
+                        "on issued keys are unchecked")
+        elif not mailer.available():
+            log.error("signup is enabled and requires email verification, but no mail "
+                      "sender is configured - every signup will return 503. Set "
+                      "TALAIA_RESEND_API_KEY or the TALAIA_SMTP_* variables.")
+        else:
+            log.info("mail backend: %s, sending as %s",
+                     mailer.backend(), mailer._from_address())
+            if mailer.using_shared_sender():
+                log.warning("using Resend's shared sender; it only delivers to the "
+                            "account owner. Verify a domain and set TALAIA_EMAIL_FROM "
+                            "before opening signup to the public.")
     stats = await store.stats()
     log.info("TALAIA ready - %s assets, %s networks, %s cached tiles",
              f"{stats['assets']:,}", f"{stats['networks']:,}", stats["cached_tiles"])

@@ -103,8 +103,17 @@ class Settings(BaseSettings):
     public_url: str = ""
 
     # --- outbound email ----------------------------------------------------
-    # Setting smtp_host selects the SMTP backend. With nothing configured, signup
-    # returns 503 rather than silently issuing unverified keys.
+    # Backends are chosen by what is set, most explicit first: a Resend API key, then
+    # SMTP, then the development console. With nothing configured, signup returns 503
+    # rather than silently issuing unverified keys.
+    #
+    # Resend needs one value and no server to run: get a key at resend.com/api-keys.
+    resend_api_key: str = ""
+    resend_api_url: str = "https://api.resend.com/emails"
+    # Resend's shared sender. It works with no DNS setup at all, but only delivers to
+    # the address that owns the Resend account - verify a domain to mail anyone else.
+    resend_default_from: str = "TALAIA <onboarding@resend.dev>"
+
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""

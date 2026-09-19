@@ -100,14 +100,15 @@ TALAIA_ALLOW_SIGNUP=true
 TALAIA_SIGNUPS_PER_IP_PER_DAY=3
 
 # Signup is email-verified, so it needs a sender and a public URL for the link.
-# Without a sender, /v1/signup returns 503 and issues nothing. Railway blocks outbound
-# port 25; use a provider's submission port (587) or its API-over-SMTP bridge.
+# Without a sender, /v1/signup returns 503 and issues nothing.
+# Two variables is the whole setup - Resend is HTTPS, so Railway's block on outbound
+# port 25 is irrelevant and there is no SMTP server to run.
 TALAIA_PUBLIC_URL=https://<your-app>.up.railway.app
-TALAIA_SMTP_HOST=smtp.resend.com
-TALAIA_SMTP_PORT=587
-TALAIA_SMTP_USER=resend
-TALAIA_SMTP_PASSWORD=<your provider token>
-TALAIA_EMAIL_FROM=TALAIA <noreply@your-domain.example>
+TALAIA_RESEND_API_KEY=re_xxxxxxxxxxxxxxxx
+
+# Optional until you open signup to the public: without it, mail goes out as Resend's
+# shared onboarding@resend.dev, which only delivers to the account owner's address.
+# TALAIA_EMAIL_FROM=TALAIA <noreply@your-domain.example>
 
 # Overpass is a volunteer service; more than one mirror is not optional.
 TALAIA_OVERPASS_MIRRORS=https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter
@@ -313,6 +314,33 @@ store, or adding an authenticated admin re-ingest endpoint that runs in-process.
 
 OpenStreetMap needs no maintenance: tiles refresh themselves when their 14-day TTL
 expires.
+
+### Checking that mail actually works
+
+Do this once, before anyone tries to sign up. The first person to discover a broken
+sender should not be a user whose confirmation never arrives.
+
+```bash
+curl -s $TALAIA/v1/admin/email -H "X-Admin-Key: $ADMIN"          # what is configured
+curl -X POST $TALAIA/v1/admin/email/test -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' -d '{"to":"you@example.com"}'
+```
+
+The test endpoint returns the provider's own error, which is usually the whole
+diagnosis:
+
+```jsonc
+{ "sent": false, "backend": "resend",
+  "error": "RuntimeError: Resend returned 403: The your-domain.example domain is not
+            verified. Please verify your domain on https://resend.com/domains" }
+```
+
+**The failure to expect:** with no `TALAIA_EMAIL_FROM`, mail is sent as Resend's shared
+`onboarding@resend.dev`, and Resend delivers that **only to the address that owns your
+Resend account**. Your own test will arrive and everyone else's signup will fail. Verify
+a domain at resend.com/domains, then set `TALAIA_EMAIL_FROM` to an address on it. The
+boot log warns while you are in that state, and `GET /v1/admin/email` reports
+`using_shared_sender: true`.
 
 ### Warming the tile cache on a live deployment
 

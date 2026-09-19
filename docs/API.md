@@ -110,7 +110,7 @@ previous one.
 | `410` | The link expired — request a new one |
 | `404` | The token is not valid |
 | `429` | Per-IP daily signup cap reached |
-| `503` | Verification is required but this deployment has no mail sender, so no key can be issued |
+| `503` | Verification is required but this deployment has no mail sender, or the send failed — no key is issued either way |
 
 That last one is deliberate: falling back to issuing an unverified key would silently undo
 verification while the operator believed addresses were being checked.
@@ -168,7 +168,7 @@ X-Response-Time-Ms: 812.4
 | `POST` | `/v1/signup` | open | Request a key; sends a confirmation email |
 | `GET`/`POST` | `/v1/verify` | open | Exchange the emailed token for the key, once |
 | `GET` | `/health` | open | Liveness and row counts |
-| `*` | `/v1/admin/*` | admin key | Key management and cache warming |
+| `*` | `/v1/admin/*` | admin key | Key management, cache warming and mail diagnostics |
 
 ¹ Open by default; an operator can gate them with `TALAIA_PUBLIC_METADATA=false`.
 

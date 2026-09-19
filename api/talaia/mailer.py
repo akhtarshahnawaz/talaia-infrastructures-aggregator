@@ -1,16 +1,22 @@
 """Outbound email, for address verification.
 
-Three backends, selected by what is configured rather than by a mode flag, because a
+Backends are selected by what is configured rather than by a mode flag, because a
 deployment that thinks it is sending mail while silently dropping it is the failure that
-matters here:
+matters here. Most explicit wins:
 
-* **smtp** - any provider. Uses the standard library in a worker thread, so this adds no
-  dependency. Chosen when ``TALAIA_SMTP_HOST`` is set.
+* **resend** - one API key, no server to run. Chosen when ``TALAIA_RESEND_API_KEY`` is
+  set. Sends over HTTPS with the httpx client already in use, so nothing new is added.
+* **smtp** - any other provider. Standard library in a worker thread. Chosen when
+  ``TALAIA_SMTP_HOST`` is set and no Resend key is.
 * **console** - logs the message instead of sending it. Explicit opt-in via
   ``TALAIA_EMAIL_CONSOLE=true``; for local development only.
 * **none** - nothing configured. :func:`available` returns False and signup refuses with
   503 rather than falling back to issuing unverified keys, which would quietly undo the
   whole point of verifying.
+
+Every backend reports *why* a send failed through :func:`last_error`, because the common
+Resend failure is a sender domain that has not been verified yet and the message the
+provider returns says exactly that.
 
 Nothing here ever emails an API key. The message carries a single-use verification link;
 the key is shown once, in the browser, after the link is followed. Email is not a
@@ -29,8 +35,13 @@ from .config import settings
 log = logging.getLogger("talaia.mailer")
 
 
+_last_error: str | None = None
+
+
 def backend() -> str:
     """Which backend will actually be used. Cheap enough to call per request."""
+    if settings.resend_api_key:
+        return "resend"
     if settings.smtp_host:
         return "smtp"
     if settings.email_console:
@@ -42,8 +53,28 @@ def available() -> bool:
     return backend() != "none"
 
 
+def last_error() -> str | None:
+    """Why the most recent send failed, for the operator-facing test endpoint."""
+    return _last_error
+
+
 def _from_address() -> str:
-    return settings.email_from or f"talaia@{settings.smtp_host or 'localhost'}"
+    if settings.email_from:
+        return settings.email_from
+    if backend() == "resend":
+        # Resend's shared sender needs no DNS, but only delivers to the account owner.
+        return settings.resend_default_from
+    return f"talaia@{settings.smtp_host or 'localhost'}"
+
+
+def using_shared_sender() -> bool:
+    """True when mail goes out as Resend's onboarding address.
+
+    Worth surfacing: in that state signup looks healthy and silently reaches nobody but
+    the account owner, which is indistinguishable from working until someone else tries
+    to register.
+    """
+    return backend() == "resend" and not settings.email_from
 
 
 def _build(to: str, subject: str, text: str, html: str | None) -> EmailMessage:
@@ -81,28 +112,62 @@ def _send_smtp(msg: EmailMessage) -> None:
             client.close()
 
 
+async def _send_resend(to: str, subject: str, text: str, html: str | None) -> None:
+    """POST one message to Resend. Raises with the provider's own message on failure."""
+    from .net import get_client
+
+    payload: dict[str, object] = {
+        "from": _from_address(), "to": [to], "subject": subject, "text": text,
+    }
+    if html:
+        payload["html"] = html
+    resp = await get_client().post(
+        settings.resend_api_url, json=payload,
+        headers={"Authorization": f"Bearer {settings.resend_api_key}",
+                 "Content-Type": "application/json"},
+        timeout=settings.smtp_timeout_s)
+    if resp.status_code >= 400:
+        detail = resp.text[:300]
+        try:
+            body = resp.json()
+            detail = str(body.get("message") or body.get("error") or detail)
+        except Exception:
+            pass
+        raise RuntimeError(f"Resend returned {resp.status_code}: {detail}")
+
+
 async def send(to: str, subject: str, text: str, html: str | None = None) -> bool:
     """Deliver one message. Returns True if it was handed to a transport.
 
     Never raises: a mail outage must surface as a clear 503 on signup, not as a 500 that
     tells the caller nothing and leaves a half-created account behind.
     """
+    global _last_error
     mode = backend()
     if mode == "none":
+        _last_error = "No mail backend configured."
         log.error("no mail backend configured; cannot send to %s", to)
         return False
     if mode == "console":
+        _last_error = None
         log.warning("\n  ---- EMAIL (console backend, not sent) ----\n"
                     "  To: %s\n  Subject: %s\n\n%s\n"
                     "  -------------------------------------------", to, subject, text)
         return True
     try:
-        await asyncio.to_thread(_send_smtp, _build(to, subject, text, html))
-        log.info("verification email sent to %s via %s", to, settings.smtp_host)
+        if mode == "resend":
+            await _send_resend(to, subject, text, html)
+            log.info("verification email sent to %s via Resend", to)
+        else:
+            await asyncio.to_thread(_send_smtp, _build(to, subject, text, html))
+            log.info("verification email sent to %s via %s", to, settings.smtp_host)
+        _last_error = None
         return True
     except Exception as exc:
-        # Log the class and message, never the recipient's mail server credentials.
-        log.error("smtp send to %s failed: %s: %s", to, type(exc).__name__, exc)
+        # Keep the provider's own wording: "The domain is not verified" is the whole
+        # diagnosis, and paraphrasing it would cost the operator the answer.
+        _last_error = f"{type(exc).__name__}: {exc}"
+        log.error("%s send to %s failed: %s", mode, to, _last_error)
         return False
 
 
