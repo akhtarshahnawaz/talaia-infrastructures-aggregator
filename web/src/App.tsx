@@ -8,6 +8,7 @@ import Signup from "./pages/Signup";
 import Mcp from "./pages/Mcp";
 import Roadmap from "./pages/Roadmap";
 import Verify from "./pages/Verify";
+import Admin from "./pages/Admin";
 
 const LINKS = [
   ["/", "Overview"],
@@ -67,6 +68,8 @@ export default function App() {
           <Route path="/roadmap" element={<Roadmap />} />
           <Route path="/signup" element={<Signup />} />
           <Route path="/verify" element={<Verify />} />
+          {/* Deliberately absent from the nav: reachable, not advertised. */}
+          <Route path="/admin" element={<Admin />} />
           <Route path="*" element={<Home />} />
         </Routes>
       </main>

@@ -631,6 +631,92 @@ async def update_key(prefix: str, payload: dict[str, Any]) -> dict[str, Any]:
     return {"prefix": record.prefix, "tier": record.tier, "limits": record.limits()}
 
 
+@admin_router.delete("/keys", summary="Revoke every active key for an email address")
+async def revoke_by_email(email: str) -> dict[str, Any]:
+    """For "I have lost my key", which is an email-shaped problem: the person asking
+    cannot read a prefix off anything they still have."""
+    revoked = await key_registry.revoke_by_email(get_store(), email)
+    if not revoked:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active key for {email}.")
+    return {"email": email.strip().lower(), "revoked": revoked}
+
+
+@admin_router.get("/usage", summary="Requests per key per day")
+async def usage(days: int = 14) -> dict[str, Any]:
+    """Daily request counts, joined to the key that made them.
+
+    Counters live in memory and flush on a timer, so today's figure trails reality by up
+    to a minute. Earlier days are settled.
+    """
+    days = max(1, min(int(days), 90))
+    store = get_store()
+    since = (datetime.now(timezone.utc).replace(tzinfo=None)
+             - timedelta(days=days)).date()
+    rows = await store.fetch(
+        "SELECT u.day, k.prefix, k.label, k.email, k.tier, u.requests "
+        "FROM key_usage u LEFT JOIN api_keys k ON k.key_hash = u.key_hash "
+        "WHERE u.day >= ? ORDER BY u.day DESC, u.requests DESC", [since])
+    by_day: dict[str, int] = {}
+    by_key: dict[str, dict[str, Any]] = {}
+    for day, prefix, label, email, tier, requests in rows:
+        key = str(day)
+        by_day[key] = by_day.get(key, 0) + int(requests or 0)
+        ident = prefix or "(revoked or unknown)"
+        entry = by_key.setdefault(ident, {"prefix": ident, "label": label,
+                                          "email": email, "tier": tier, "requests": 0})
+        entry["requests"] += int(requests or 0)
+    return {
+        "days": days,
+        "total_requests": sum(by_day.values()),
+        "by_day": [{"day": d, "requests": n} for d, n in sorted(by_day.items())],
+        "by_key": sorted(by_key.values(), key=lambda r: -r["requests"]),
+        "note": ("Today's counts flush from memory on a timer and may trail by up to a "
+                 "minute. Keys revoked since a request was made show as unknown."),
+    }
+
+
+@admin_router.get("/signups", summary="Recent signups and pending verifications")
+async def signups(limit: int = 50) -> dict[str, Any]:
+    """Both halves of the funnel: addresses that confirmed, and addresses still sitting
+    on an unfollowed link."""
+    limit = max(1, min(int(limit), 500))
+    store = get_store()
+    completed = await store.fetch(
+        "SELECT email, organisation, ip, created_at, key_prefix FROM signups "
+        "ORDER BY created_at DESC LIMIT ?", [limit])
+    pending = await store.fetch(
+        "SELECT email, organisation, ip, created_at, expires_at FROM pending_signups "
+        "WHERE consumed_at IS NULL ORDER BY created_at DESC LIMIT ?", [limit])
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return {
+        "completed": [{"email": e, "organisation": o, "ip": i, "created_at": c,
+                       "key_prefix": k} for e, o, i, c, k in completed],
+        "pending": [{"email": e, "organisation": o, "ip": i, "created_at": c,
+                     "expires_at": x, "expired": bool(x and x < now)}
+                    for e, o, i, c, x in pending],
+    }
+
+
+@admin_router.delete("/signups/pending", summary="Clear a pending verification")
+async def clear_pending(email: str) -> dict[str, Any]:
+    """Drop unfollowed confirmation links for an address, so it can start over.
+
+    Useful when someone mistyped their address, or when mail was misconfigured and the
+    links that went out are unreachable.
+    """
+    store = get_store()
+    target = email.strip().lower()
+    before = await store.fetch(
+        "SELECT count(*) FROM pending_signups WHERE lower(email) = ? "
+        "AND consumed_at IS NULL", [target])
+    await store.execute_write(
+        "DELETE FROM pending_signups WHERE lower(email) = ? AND consumed_at IS NULL",
+        [target])
+    return {"email": target, "cleared": int(before[0][0]) if before else 0}
+
+
 @admin_router.get("/email", summary="What the mail sender is configured to do")
 async def email_status() -> dict[str, Any]:
     """Report the active backend without sending anything."""

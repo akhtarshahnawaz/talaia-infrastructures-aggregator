@@ -361,3 +361,52 @@ async def test_the_bootstrap_key_is_not_area_capped(store, monkeypatch):
     await reg.load(store)
     key = reg.verify(reg.bootstrap_key)
     assert key.tier == "unlimited" and key.unlimited_area is True
+
+
+# -- revoking a key someone has lost ----------------------------------------
+async def test_a_prefix_is_accepted_with_or_without_its_ellipsis(store):
+    """Listings and the 409 message both show the prefix ending in "...", so that is
+    what gets pasted into a URL - while the obvious thing to type is the bare prefix."""
+    reg = KeyRegistry()
+    raw, record = await reg.create(store, label="lost", tier="free")
+    assert record.prefix.endswith("...")
+
+    assert await reg.revoke(store, record.prefix.rstrip(".")) is True
+    assert reg.verify(raw) is None
+
+
+async def test_revoking_by_email_frees_the_address(store):
+    """The whole point: someone who lost their key cannot read a prefix off anything
+    they still have, but they know their own email."""
+    reg = KeyRegistry()
+    raw, record = await reg.create(store, label="lost", tier="free",
+                                   email="Someone@Example.com")
+
+    revoked = await reg.revoke_by_email(store, "someone@example.com")
+    assert revoked == [record.prefix], "case-insensitive on the address"
+    assert reg.verify(raw) is None
+
+    rows = await store.fetch(
+        "SELECT count(*) FROM api_keys WHERE email = ? AND revoked_at IS NULL",
+        ["Someone@Example.com"])
+    assert rows[0][0] == 0, "the address is free to sign up again"
+
+
+async def test_revoking_by_email_takes_every_active_key(store):
+    reg = KeyRegistry()
+    for i in range(3):
+        await reg.create(store, label=f"k{i}", tier="free", email="many@example.com")
+    assert len(await reg.revoke_by_email(store, "many@example.com")) == 3
+
+
+async def test_revoking_an_unknown_address_reports_nothing_rather_than_failing(store):
+    reg = KeyRegistry()
+    assert await reg.revoke_by_email(store, "nobody@example.com") == []
+
+
+async def test_an_already_revoked_key_is_not_revoked_twice(store):
+    reg = KeyRegistry()
+    _, record = await reg.create(store, label="once", tier="free",
+                                 email="twice@example.com")
+    assert len(await reg.revoke_by_email(store, "twice@example.com")) == 1
+    assert await reg.revoke_by_email(store, "twice@example.com") == []

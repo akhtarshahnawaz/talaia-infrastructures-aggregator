@@ -170,7 +170,7 @@ X-Response-Time-Ms: 812.4
 | `POST` | `/v1/signup` | open | Request a key; sends a confirmation email |
 | `GET`/`POST` | `/v1/verify` | open | Exchange the emailed token for the key, once |
 | `GET` | `/health` | open | Liveness and row counts |
-| `*` | `/v1/admin/*` | admin key | Key management, cache warming and mail diagnostics |
+| `*` | `/v1/admin/*` | admin key | Key management, usage, signups, cache warming and mail diagnostics. Browser UI at `/admin`. |
 
 ¹ Open by default; an operator can gate them with `TALAIA_PUBLIC_METADATA=false`.
 

@@ -239,3 +239,85 @@ async def test_bootstrap_resumes_a_partial_load(store):
     assert "es.cat.equipaments" not in pending, "already loaded"
     assert "es.ine.popgrid" in pending, "never loaded, so it must be picked up"
     assert "es.msan.hospitales" in pending
+
+
+# -- admin panel endpoints ---------------------------------------------------
+async def test_usage_groups_by_day_and_by_key(store):
+    """What the panel's Usage tab renders. A revoked key still has history, so the
+    join has to survive the key being gone."""
+    from datetime import date
+
+    from talaia.routers.v1 import usage
+    from talaia.store import set_store
+
+    set_store(store)
+    await store.execute_write(
+        "INSERT INTO api_keys (key_hash, prefix, label, tier, email, created_at) "
+        "VALUES ('h1', 'talaia_sk_aaa...', 'one', 'free', 'a@example.com', current_timestamp)")
+    today = date.today()
+    for key_hash, n in (("h1", 40), ("h1", 0), ("ghost", 7)):
+        await store.execute_write(
+            "INSERT OR REPLACE INTO key_usage (key_hash, day, requests) VALUES (?, ?, ?)",
+            [key_hash, today, n])
+
+    out = await usage(days=7)
+    assert out["total_requests"] == 7          # h1's second insert replaced the first
+    by_key = {r["prefix"]: r for r in out["by_key"]}
+    assert "(revoked or unknown)" in by_key, "history outlives the key that made it"
+
+
+async def test_signups_separates_confirmed_from_pending(store):
+    from datetime import datetime, timedelta, timezone
+
+    from talaia.routers.v1 import signups
+    from talaia.store import set_store
+
+    set_store(store)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    await store.execute_write(
+        "INSERT INTO signups (id, email, organisation, ip, created_at, key_prefix) "
+        "VALUES ('1', 'done@example.com', 'Org', '1.2.3.4', ?, 'talaia_sk_x...')", [now])
+    for email, expires in (("waiting@example.com", now + timedelta(hours=4)),
+                           ("gaveup@example.com", now - timedelta(hours=4))):
+        await store.execute_write(
+            "INSERT INTO pending_signups (token_hash, email, ip, created_at, expires_at) "
+            "VALUES (?, ?, '1.2.3.4', ?, ?)", [email, email, now, expires])
+
+    out = await signups()
+    assert [s["email"] for s in out["completed"]] == ["done@example.com"]
+    pending = {p["email"]: p for p in out["pending"]}
+    assert pending["waiting@example.com"]["expired"] is False
+    assert pending["gaveup@example.com"]["expired"] is True, (
+        "an expired link is still pending, but the panel has to say it is dead")
+
+
+async def test_clearing_a_pending_signup_lets_the_address_start_over(store):
+    from datetime import datetime, timezone
+
+    from talaia.routers.v1 import clear_pending, signups
+    from talaia.store import set_store
+
+    set_store(store)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    await store.execute_write(
+        "INSERT INTO pending_signups (token_hash, email, ip, created_at, expires_at) "
+        "VALUES ('t', 'Typo@Example.com', '1.2.3.4', ?, ?)", [now, now])
+
+    out = await clear_pending("typo@example.com")     # case-insensitive
+    assert out["cleared"] == 1
+    assert (await signups())["pending"] == []
+
+
+async def test_a_consumed_signup_is_not_listed_as_pending(store):
+    from datetime import datetime, timezone
+
+    from talaia.routers.v1 import signups
+    from talaia.store import set_store
+
+    set_store(store)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    await store.execute_write(
+        "INSERT INTO pending_signups (token_hash, email, ip, created_at, expires_at, "
+        "consumed_at) VALUES ('t', 'used@example.com', '1.2.3.4', ?, ?, ?)",
+        [now, now, now])
+    assert (await signups())["pending"] == []

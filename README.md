@@ -186,7 +186,11 @@ so a key can be listed and revoked without being exposed. Comparison is constant
 dump of the database yields no usable credentials, and a key is shown exactly once — at
 creation.
 
-**Managing keys.** While the service runs, use the admin API (enabled only when
+**Managing keys.** There is a browser panel at **`/admin`** — sign in with
+`TALAIA_ADMIN_KEY` for keys, signups, usage, tiers, cache warming and mail diagnostics.
+It is not linked from the navigation.
+
+Or use the admin API directly (enabled only when
 `TALAIA_ADMIN_KEY` is set; otherwise the endpoints 404 rather than advertising
 themselves):
 

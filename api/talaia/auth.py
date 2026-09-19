@@ -313,9 +313,20 @@ class KeyRegistry:
         return raw, record
 
     async def revoke(self, store, prefix: str) -> bool:
-        rows = await store.fetch(
-            "SELECT key_hash FROM api_keys WHERE prefix = ? AND revoked_at IS NULL",
-            [prefix])
+        """Revoke by prefix. Tolerant of the trailing ellipsis.
+
+        The stored prefix ends in a literal "...", which is what listings and error
+        messages show - so the obvious thing to paste into a URL is the thing with the
+        dots on it, and the obvious thing to type is the thing without. Both work.
+        """
+        candidates = [prefix, prefix.rstrip("."), prefix.rstrip(".") + "..."]
+        rows: list = []
+        for candidate in dict.fromkeys(candidates):
+            rows = await store.fetch(
+                "SELECT key_hash FROM api_keys WHERE prefix = ? AND revoked_at IS NULL",
+                [candidate])
+            if rows:
+                break
         if not rows:
             return False
         for (key_hash,) in rows:
@@ -362,6 +373,21 @@ class KeyRegistry:
         self._by_hash[key_hash] = values
         log.info("api key updated: %s -> tier=%s", prefix, values.tier)
         return values
+
+    async def revoke_by_email(self, store, email: str) -> list[str]:
+        """Revoke every active key for an address. Returns the prefixes revoked.
+
+        "I have lost my key" is an email-shaped problem, not a prefix-shaped one - the
+        person asking cannot read the prefix off anything they still have.
+        """
+        rows = await store.fetch(
+            "SELECT prefix FROM api_keys WHERE lower(email) = ? AND revoked_at IS NULL",
+            [email.strip().lower()])
+        revoked = []
+        for (prefix,) in rows:
+            if await self.revoke(store, prefix):
+                revoked.append(prefix)
+        return revoked
 
     async def list_keys(self, store) -> list[dict]:
         rows = await store.fetch(

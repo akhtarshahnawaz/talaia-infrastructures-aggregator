@@ -61,6 +61,31 @@ the key listing means.
 
 ---
 
+## 1b. The admin panel
+
+Everything below can be done from a browser at **`/admin`** on your deployment. Sign in
+with the value of `TALAIA_ADMIN_KEY`.
+
+| Tab | What it does |
+|---|---|
+| **API keys** | Every key with its tier, email, verification state, area cap, usage today and lifetime count. Mint, re-tier from a dropdown, revoke. |
+| **Signups** | Confirmed signups, addresses still sitting on an unfollowed link, and **revoke by email** for someone who lost their key. Clear a stuck pending link. |
+| **Usage** | Requests per day and per key, over 7 to 90 days. Keeps history for keys that no longer exist. |
+| **Tiers** | What each tier currently allows. Read-only — tiers come from the environment. |
+| **Data & cache** | Store contents by source, tile-cache coverage by region, and start or stop a warm with live progress. |
+| **Email** | Active backend and sender, plus a real test send that returns the provider's own error. |
+
+The key is held in `sessionStorage`, so it is gone when the tab closes — it grants full
+control over every key on the deployment, which is not something to leave sitting in
+`localStorage`. The page is not linked from the navigation, and `/v1/admin/*` returns
+`404` rather than `401` when `TALAIA_ADMIN_KEY` is unset, so a deployment that does not
+use it does not advertise it.
+
+**It is still an admin credential typed into a browser.** Anyone with that tab has full
+control. Do not sign in on a shared machine, and treat the key like a root password.
+
+---
+
 ## 2. Creating an unlimited key
 
 Three ways. Pick by whether the service is running.
@@ -107,6 +132,23 @@ python -m talaia key create --tier unlimited --label deepfire-integration
 python -m talaia key list
 python -m talaia key revoke talaia_sk_abc123...
 ```
+
+### Revoking a key somebody lost
+
+Keys are stored as hashes and cannot be shown again, so the answer to "I lost my key" is
+always to revoke and re-issue. The `409` on re-signup names the prefix; all three of these
+work:
+
+```bash
+# By prefix - with or without the trailing "..." the listing shows
+curl -X DELETE "$TALAIA/v1/admin/keys/talaia_sk_vFeU5W..." -H "X-Admin-Key: $ADMIN"
+
+# By email, when they cannot read a prefix off anything they still have
+curl -X DELETE "$TALAIA/v1/admin/keys?email=them@example.com" -H "X-Admin-Key: $ADMIN"
+```
+
+Or the **Signups** tab in the admin panel, which has a "revoke by email" box. Once
+revoked, the address is free to sign up again from scratch.
 
 ### Upgrading an existing key
 

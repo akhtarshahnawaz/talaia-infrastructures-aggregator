@@ -274,7 +274,7 @@ if settings.web_dist.exists():
     # link, and answering 200 for it makes those indistinguishable from real pages to a
     # crawler or an uptime check.
     SPA_ROUTES = {"", "playground", "docs", "agents", "sources", "roadmap",
-                  "methodology", "signup", "verify"}
+                  "methodology", "signup", "verify", "admin"}
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa(path: str):

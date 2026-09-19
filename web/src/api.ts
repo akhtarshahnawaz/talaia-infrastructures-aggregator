@@ -150,3 +150,73 @@ export const CATEGORY_COLOR: Record<string, string> = {
   commercial: "#2dd4bf", tourism: "#f472b6", heritage: "#a78bfa",
   environment: "#4ade80",
 };
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+// The admin key lives in sessionStorage, not localStorage: it grants full control of
+// every key on the deployment, so it should not outlive the tab it was typed into.
+const ADMIN_STORE = "talaia_admin_key";
+
+export const getAdminKey = () => {
+  try { return sessionStorage.getItem(ADMIN_STORE) ?? ""; } catch { return ""; }
+};
+export const setAdminKey = (k: string) => {
+  try { k ? sessionStorage.setItem(ADMIN_STORE, k) : sessionStorage.removeItem(ADMIN_STORE); }
+  catch { /* private mode - the key simply will not persist */ }
+};
+
+export class AdminAuthError extends Error {}
+
+async function admin<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const key = getAdminKey();
+  const r = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { "content-type": "application/json", "X-Admin-Key": key, ...(init.headers ?? {}) },
+  });
+  if (r.status === 401) throw new AdminAuthError("That admin key was not accepted.");
+  if (r.status === 404 && !key) {
+    throw new AdminAuthError("Key management is disabled: TALAIA_ADMIN_KEY is not set on this deployment.");
+  }
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((body as any).detail ?? `HTTP ${r.status}`);
+  return body as T;
+}
+
+export interface AdminKey {
+  prefix: string; label: string | null; tier: string;
+  rate_limit_per_min: number | string; daily_quota: number | string;
+  max_aoi_km2: number | string; custom_limits: boolean;
+  email: string | null; email_verified: boolean;
+  created_at: string | null; revoked_at: string | null;
+  request_count: number | null; used_today: number; source: string;
+}
+
+export const adminListKeys = () => admin<AdminKey[]>("/v1/admin/keys");
+export const adminCreateKey = (body: Record<string, any>) =>
+  admin<any>("/v1/admin/keys", { method: "POST", body: JSON.stringify(body) });
+export const adminUpdateKey = (prefix: string, body: Record<string, any>) =>
+  admin<any>(`/v1/admin/keys/${encodeURIComponent(prefix)}`,
+    { method: "PATCH", body: JSON.stringify(body) });
+export const adminRevokeKey = (prefix: string) =>
+  admin<any>(`/v1/admin/keys/${encodeURIComponent(prefix)}`, { method: "DELETE" });
+export const adminRevokeByEmail = (email: string) =>
+  admin<any>(`/v1/admin/keys?email=${encodeURIComponent(email)}`, { method: "DELETE" });
+
+export const adminUsage = (days = 14) => admin<any>(`/v1/admin/usage?days=${days}`);
+export const adminSignups = () => admin<any>("/v1/admin/signups");
+export const adminClearPending = (email: string) =>
+  admin<any>(`/v1/admin/signups/pending?email=${encodeURIComponent(email)}`,
+    { method: "DELETE" });
+
+export const adminEmailStatus = () => admin<any>("/v1/admin/email");
+export const adminEmailTest = (to: string) =>
+  admin<any>("/v1/admin/email/test", { method: "POST", body: JSON.stringify({ to }) });
+
+export const adminWarmStatus = () => admin<any>("/v1/admin/warm");
+export const adminWarmStart = (body: Record<string, any>) =>
+  admin<any>("/v1/admin/warm", { method: "POST", body: JSON.stringify(body) });
+export const adminWarmStop = () => admin<any>("/v1/admin/warm", { method: "DELETE" });
+
+export const getRegions = () => req<any>("/v1/regions");
+export const getCoverage = () => req<any>("/v1/coverage");

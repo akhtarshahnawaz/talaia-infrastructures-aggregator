@@ -360,7 +360,19 @@ should issue a key, and `/playground` should run a query once you paste one in.
 
 ---
 
-## 11. Custom domain (optional)
+## 11. The admin panel
+
+With `TALAIA_ADMIN_KEY` set, open **`https://<your-app>.up.railway.app/admin`** and sign
+in with that value. Keys, signups, usage, tiers, cache warming and mail diagnostics, all
+from the browser — see [LIMITS-AND-KEYS.md](LIMITS-AND-KEYS.md#1b-the-admin-panel).
+
+The page is not linked from the site navigation, and the admin routes return `404` rather
+than `401` when no admin key is configured, so a deployment that does not use it does not
+advertise it. The key lives in `sessionStorage` and is gone when the tab closes.
+
+---
+
+## 12. Custom domain (optional)
 
 Settings → **Networking → Custom Domain** → enter `talaia.yourdomain.org`, then add the
 `CNAME` Railway shows you at your DNS provider. TLS is issued automatically. If you set
@@ -502,3 +514,4 @@ More in [EMAIL-SETUP.md](EMAIL-SETUP.md#6-troubleshooting).
 - [ ] `TALAIA_CORS_ORIGINS` narrowed if a browser app will call this
 - [ ] Volume attached at `/data` — keys and data both live there
 - [ ] Verified a keyless request returns 401
+- [ ] You know `/admin` exists and that anyone with the admin key has full control there
