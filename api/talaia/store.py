@@ -425,10 +425,13 @@ class Store:
         rows = await self.fetch(
             "SELECT source_id, count(*) FROM assets GROUP BY source_id")
         counts = {r[0]: r[1] for r in rows}
-        net = await self.fetch(
-            "SELECT source_id, count(*) FROM networks GROUP BY source_id")
-        for sid, n in net:
-            counts[sid] = counts.get(sid, 0) + n
+        for table in ("networks", "pop_grid"):
+            # Population cells and linear features live in their own tables; without
+            # this the source catalogue reports them as "never run" while holding 63k rows.
+            for sid, n in await self.fetch(
+                    f"SELECT source_id, count(*) FROM {table} GROUP BY source_id"):
+                if sid:
+                    counts[sid] = counts.get(sid, 0) + n
         runs = await self.fetch(
             "SELECT source_id, max(finished_at), any_value(status), any_value(error) "
             "FROM source_runs GROUP BY source_id")
