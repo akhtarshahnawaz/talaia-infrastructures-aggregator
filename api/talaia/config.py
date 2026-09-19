@@ -57,6 +57,19 @@ class Settings(BaseSettings):
     auto_bootstrap: bool = True
     core_impl: str = "auto"  # auto | rust | python
 
+    # --- authentication ----------------------------------------------------
+    # Secure by default: the API is gated unless this is explicitly turned off.
+    require_auth: bool = True
+    # Comma-separated. Either "key" or "label:key".
+    api_keys: str = ""
+    # Enables the runtime key-management endpoints when set.
+    admin_key: str | None = None
+    rate_limit_per_min: int = 120
+    # /v1/sources, /v1/taxonomy and /v1/stats describe the service rather than returning
+    # exposure data, and the public documentation site renders them. They stay open by
+    # default; set this to false to gate absolutely everything.
+    public_metadata: bool = True
+
     # --- server ----------------------------------------------------------
     cors_origins: str = "*"
     web_dist: Path = REPO_ROOT / "web" / "dist"
@@ -68,6 +81,10 @@ class Settings(BaseSettings):
     @property
     def overpass_mirror_list(self) -> list[str]:
         return [m.strip() for m in self.overpass_mirrors.split(",") if m.strip()]
+
+    @property
+    def api_key_list(self) -> list[str]:
+        return [k.strip() for k in self.api_keys.split(",") if k.strip()]
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -44,8 +44,12 @@ PYTHONPATH=api .venv/bin/python -m uvicorn talaia.main:app --port 8000
 
 Open <http://localhost:8000> for the website, `/swagger` for the OpenAPI UI.
 
+**The API is gated by default.** With no keys configured, the service mints one at first
+boot and prints it to the log once — copy it from there, or set `TALAIA_API_KEYS`.
+
 ```bash
-curl -X POST localhost:8000/v1/exposure -H 'content-type: application/json' -d '{
+curl -X POST localhost:8000/v1/exposure \
+  -H "X-API-Key: talaia_sk_…" -H 'content-type: application/json' -d '{
   "aoi": {"type":"Polygon","coordinates":[[[1.80,41.71],[1.87,41.71],
                                            [1.87,41.755],[1.80,41.755],[1.80,41.71]]]}}'
 ```
@@ -98,6 +102,57 @@ occupancy, replacement cost, a triage score and per-field provenance.
 | `GET` | `/v1/taxonomy` | 17 categories, 116 subcategories, scoring parameters |
 | `GET` | `/v1/stats` · `/health` | Store contents, liveness |
 | `POST` | `/v1/geocode` | CartoCiudad passthrough, cached |
+| `POST`/`GET`/`DELETE` | `/v1/admin/keys` | Mint, list and revoke API keys |
+
+---
+
+## Authentication
+
+Data endpoints — `/v1/exposure`, `/v1/exposure/summary`, `/v1/assets`, `/v1/geocode` —
+require an API key. Send it as either header:
+
+```
+X-API-Key: talaia_sk_…
+Authorization: Bearer talaia_sk_…
+```
+
+Keys are **never accepted in a query string**, where they would leak into access logs,
+browser history and referrer headers.
+
+**How keys are stored.** Only a SHA-256 hash is persisted, plus a short non-secret prefix
+so a key can be listed and revoked without being exposed. Comparison is constant-time. A
+dump of the database yields no usable credentials, and a key is shown exactly once — at
+creation.
+
+**Managing keys.** While the service runs, use the admin API (enabled only when
+`TALAIA_ADMIN_KEY` is set; otherwise the endpoints 404 rather than advertising
+themselves):
+
+```bash
+curl -X POST localhost:8000/v1/admin/keys -H "X-Admin-Key: $ADMIN" \
+     -H 'content-type: application/json' \
+     -d '{"label":"deepfire-agent","rate_limit_per_min":30}'
+
+curl localhost:8000/v1/admin/keys -H "X-Admin-Key: $ADMIN"          # prefixes only
+curl -X DELETE localhost:8000/v1/admin/keys/talaia_sk_xTj2zp... -H "X-Admin-Key: $ADMIN"
+```
+
+With the service stopped (DuckDB is single-writer), the CLI does the same:
+
+```bash
+PYTHONPATH=api python -m talaia key create --label deepfire-agent --limit 30
+PYTHONPATH=api python -m talaia key list
+PYTHONPATH=api python -m talaia key revoke talaia_sk_xTj2zp...
+```
+
+**Rate limiting** is per key, sliding 60-second window, default 120 req/min and
+overridable per key. Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`;
+a 429 carries `Retry-After`.
+
+**What stays open:** `/health` (so Railway's health check works), the documentation
+website, and the three metadata endpoints `/v1/sources`, `/v1/taxonomy`, `/v1/stats`,
+which describe the service rather than returning exposure data and are rendered by the
+public site. Set `TALAIA_PUBLIC_METADATA=false` to gate those too.
 
 ---
 

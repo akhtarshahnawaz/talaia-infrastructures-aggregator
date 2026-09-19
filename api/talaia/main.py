@@ -19,7 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .connectors import registry
 from .net import close_client
-from .routers.v1 import router as v1_router
+from .auth import registry as key_registry
+from .routers.v1 import (admin_router, meta_router,
+                         router as v1_router)
 from .store import Store, get_store, set_store
 
 logging.basicConfig(level=logging.INFO,
@@ -42,6 +44,19 @@ a replacement-cost valuation, a triage score and full source provenance.
 * `POST /v1/assets` - NDJSON stream
 * `GET  /v1/sources` - live data-source catalogue
 * `GET  /v1/taxonomy` - the classification vocabulary
+
+## Authentication
+
+Data endpoints require an API key, sent as either header:
+
+```
+X-API-Key: talaia_sk_...
+Authorization: Bearer talaia_sk_...
+```
+
+Keys are rate limited per minute; `X-RateLimit-Remaining` reports the budget left.
+`/v1/sources`, `/v1/taxonomy` and `/v1/stats` describe the service rather than returning
+exposure data and are open by default.
 
 Every figure carries its method, confidence and source. Capacity is never live occupancy
 and valuations are parametric estimates, not appraisals.
@@ -66,6 +81,12 @@ async def lifespan(app: FastAPI):
     store = Store()
     store.connect()
     set_store(store)
+    await key_registry.load(store)
+    if settings.require_auth:
+        log.info("authentication ENABLED - %d key(s) active", len(key_registry))
+    else:
+        log.warning("authentication DISABLED - every endpoint is open "
+                    "(set TALAIA_REQUIRE_AUTH=true to gate the API)")
     stats = await store.stats()
     log.info("TALAIA ready - %s assets, %s networks, %s cached tiles",
              f"{stats['assets']:,}", f"{stats['networks']:,}", stats["cached_tiles"])
@@ -105,6 +126,12 @@ async def timing_and_request_id(request: Request, call_next):
     response = await call_next(request)
     response.headers["x-request-id"] = rid
     response.headers["x-response-time-ms"] = f"{(time.perf_counter()-start)*1000:.1f}"
+    # Surface the caller's remaining budget so clients can pace themselves.
+    key = getattr(request.state, "api_key", None)
+    if key is not None:
+        response.headers["x-ratelimit-limit"] = str(key.rate_limit_per_min)
+        response.headers["x-ratelimit-remaining"] = str(
+            getattr(request.state, "rate_remaining", 0))
     return response
 
 
@@ -128,6 +155,8 @@ async def health():
 
 
 app.include_router(v1_router)
+app.include_router(meta_router)
+app.include_router(admin_router)
 
 # -- website ---------------------------------------------------------------
 if settings.web_dist.exists():

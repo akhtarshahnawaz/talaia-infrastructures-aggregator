@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS source_runs (
     error       VARCHAR
 );
 
+-- ---------------------------------------------------------------------------
+-- api_keys: only a SHA-256 hash is stored. The prefix is a non-secret handle used
+-- for listing and revocation, so a key can be identified without being exposed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_hash           VARCHAR PRIMARY KEY,
+    prefix             VARCHAR,
+    label              VARCHAR,
+    rate_limit_per_min INTEGER DEFAULT 120,
+    created_at         TIMESTAMP,
+    revoked_at         TIMESTAMP,
+    last_used_at       TIMESTAMP,
+    request_count      BIGINT DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS assets_geom_idx   ON assets   USING RTREE (geom);
 CREATE INDEX IF NOT EXISTS networks_geom_idx ON networks USING RTREE (geom);
 CREATE INDEX IF NOT EXISTS popgrid_geom_idx  ON pop_grid USING RTREE (geom);

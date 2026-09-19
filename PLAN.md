@@ -204,6 +204,7 @@ health check, background bootstrap on empty DB, `.env.example`.
 | M11 API | **done** | 8 endpoints + OpenAPI, all verified 200 |
 | M12 Website | **done** | 5 pages, live playground, sources rendered from the API |
 | M13 Deployment | **partial** | Dockerfile, railway.json and .env.example written. **The image has not been built or deployed** — no Docker daemon was available in the build environment |
+| M15 Authentication | **done** | API-key gate, hashed storage, per-key rate limiting, admin + CLI key management, 11 tests |
 | M14 Verification | **done** | 41 tests; endpoint sweep; latency table; browser walkthrough |
 
 ## Known gaps, stated plainly

@@ -206,6 +206,15 @@ class Store:
                 self._fetch, "DELETE FROM assets WHERE source_id = ?", [source_id]
             )
 
+    async def execute_write(self, sql: str, params: Sequence[Any] | None = None) -> None:
+        """Run a single write statement under the writer lock.
+
+        DuckDB allows one writer; bulk paths already serialise through ``_write_lock``
+        and small administrative writes must do the same or they can interleave.
+        """
+        async with self._write_lock:
+            await asyncio.to_thread(self._fetch, sql, params)
+
     # -- spatial reads -----------------------------------------------------
     # -- query planning ----------------------------------------------------
     # Measured on this hardware (100k rows): evaluating ST_Intersects against the stored

@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import MapView from "../components/MapView";
 import { Card, Note, Pill } from "../components/ui";
-import { CATEGORY_COLOR, eur, num, postExposure, type ExposureReport } from "../api";
+import { AuthError, CATEGORY_COLOR, eur, getApiKey, num, postExposure, setApiKey,
+         type ExposureReport } from "../api";
 
 const PRESET_SIMPLE = {
   type: "Polygon",
@@ -41,6 +42,8 @@ export default function Playground() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"summary" | "assets" | "json">("summary");
   const [pasted, setPasted] = useState("");
+  const [apiKey, setKeyState] = useState(getApiKey());
+  const [needsKey, setNeedsKey] = useState(false);
 
   const run = async () => {
     if (!aoi) { setError("Draw or choose an area first."); return; }
@@ -52,7 +55,9 @@ export default function Playground() {
       });
       setReport(r); setTab("summary");
     } catch (e: any) {
-      setError(e.message ?? String(e)); setReport(null);
+      setError(e.message ?? String(e));
+      setNeedsKey(e instanceof AuthError);
+      setReport(null);
     } finally { setLoading(false); }
   };
 
@@ -160,6 +165,29 @@ export default function Playground() {
               {loading ? "Aggregating…" : "Run exposure query"}
             </button>
             {error && <div className="mt-3 rounded border border-rose-800 bg-rose-500/10 p-2 text-xs text-rose-300">{error}</div>}
+
+            <div className={`mt-4 rounded-lg border p-3 ${
+              needsKey ? "border-ember-700 bg-ember-500/5" : "border-slate-800"}`}>
+              <label className="flex items-center justify-between text-xs text-slate-400">
+                <span>API key</span>
+                {apiKey && <span className="text-[10px] text-emerald-400">stored in this browser</span>}
+              </label>
+              <div className="mt-1.5 flex gap-2">
+                <input type="password" value={apiKey} placeholder="talaia_sk_…"
+                  onChange={(e) => { setKeyState(e.target.value); setApiKey(e.target.value); }}
+                  className="min-w-0 flex-1 rounded-md border border-slate-700 bg-night-900 px-2.5 py-1.5 font-mono text-[11px] text-slate-200" />
+                {apiKey && (
+                  <button onClick={() => { setKeyState(""); setApiKey(""); }}
+                    className="shrink-0 rounded-md border border-slate-700 px-2 text-[11px] text-slate-400 hover:border-slate-500">
+                    clear
+                  </button>
+                )}
+              </div>
+              <p className="mt-1.5 text-[10.5px] leading-relaxed text-slate-500">
+                Exposure queries require a key. It is kept in this browser only and sent as an
+                <code className="mx-1 text-slate-400">X-API-Key</code> header — never in the URL.
+              </p>
+            </div>
           </Card>
 
           <Card className="p-4">

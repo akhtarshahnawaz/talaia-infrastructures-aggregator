@@ -92,6 +92,46 @@ async def cmd_query(args) -> int:
     return 0
 
 
+async def cmd_key(args) -> int:
+    """Manage API keys offline. The API process must be stopped: DuckDB is single-writer.
+
+    While the service is running, use the admin endpoints instead:
+        POST   /v1/admin/keys
+        GET    /v1/admin/keys
+        DELETE /v1/admin/keys/{prefix}
+    """
+    from talaia.auth import registry as key_registry
+
+    store = Store(args.db) if args.db else Store()
+    store.connect(); set_store(store)
+    try:
+        await key_registry.load(store)
+        if args.action == "create":
+            raw, record = await key_registry.create(
+                store, label=args.label, rate_limit_per_min=args.limit)
+            print("\nAPI key created. This is shown ONCE and cannot be recovered:\n")
+            print(f"    {raw}\n")
+            print(f"  label {record.label}   prefix {record.prefix}   "
+                  f"limit {record.rate_limit_per_min}/min")
+        elif args.action == "list":
+            keys = await key_registry.list_keys(store)
+            if not keys:
+                print("no API keys configured")
+            else:
+                print(f"{'prefix':<22} {'label':<20} {'limit':>6} {'source':<7} {'status'}")
+                for k in keys:
+                    status = "revoked" if k["revoked_at"] else "active"
+                    print(f"{k['prefix']:<22} {(k['label'] or ''):<20} "
+                          f"{k['rate_limit_per_min'] or '-':>6} {k['source']:<7} {status}")
+        elif args.action == "revoke":
+            ok = await key_registry.revoke(store, args.prefix)
+            print("revoked" if ok else f"no active key with prefix {args.prefix!r}")
+            return 0 if ok else 1
+    finally:
+        store.close()
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="talaia")
     p.add_argument("--db", help="path to the DuckDB file")
@@ -103,6 +143,13 @@ def main() -> int:
 
     ps = sub.add_parser("stats", help="show store contents")
     ps.set_defaults(fn=cmd_stats)
+
+    pk = sub.add_parser("key", help="manage API keys (stop the server first)")
+    pk.add_argument("action", choices=["create", "list", "revoke"])
+    pk.add_argument("prefix", nargs="?", help="key prefix, for revoke")
+    pk.add_argument("--label", default="cli", help="human label for the key")
+    pk.add_argument("--limit", type=int, default=None, help="requests per minute")
+    pk.set_defaults(fn=cmd_key)
 
     pq = sub.add_parser("query", help="query a polygon")
     pq.add_argument("aoi", help="GeoJSON file path or inline GeoJSON")

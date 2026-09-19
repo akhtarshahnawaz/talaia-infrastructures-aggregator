@@ -59,14 +59,37 @@ export interface ExposureReport {
             tiles_fetched: number; tiles_cached: number; core_impl: string };
 }
 
+// The key lives only in this browser. It is never sent anywhere but this API, and
+// never placed in a URL, where it would leak into logs, history and referrers.
+const KEY_STORAGE = "talaia.apiKey";
+
+export function getApiKey(): string {
+  try { return localStorage.getItem(KEY_STORAGE) ?? ""; } catch { return ""; }
+}
+
+export function setApiKey(key: string): void {
+  try {
+    if (key) localStorage.setItem(KEY_STORAGE, key.trim());
+    else localStorage.removeItem(KEY_STORAGE);
+  } catch { /* private browsing: the key simply is not remembered */ }
+}
+
+export class AuthError extends Error {}
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const key = getApiKey();
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     let detail = res.statusText;
     try { const b = await res.json(); detail = b.detail ?? b.error ?? detail; } catch {}
+    if (res.status === 401) {
+      throw new AuthError(key
+        ? `That API key was rejected. ${detail}`
+        : "This endpoint needs an API key. Paste one below to continue.");
+    }
+    if (res.status === 429) throw new Error(`Rate limited — ${detail}`);
     throw new Error(`${res.status}: ${detail}`);
   }
   return res.json();

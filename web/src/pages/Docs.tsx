@@ -8,7 +8,10 @@ const ENDPOINTS = [
   ["GET", "/v1/taxonomy", "The closed vocabulary with per-subcategory scoring parameters."],
   ["GET", "/v1/stats", "What the store currently holds."],
   ["POST", "/v1/geocode", "CartoCiudad passthrough, cached."],
-  ["GET", "/health", "Liveness and row counts."],
+  ["GET", "/health", "Liveness and row counts. Open."],
+  ["POST", "/v1/admin/keys", "Mint an API key. Guarded by X-Admin-Key."],
+  ["GET", "/v1/admin/keys", "List keys — prefixes only, never secrets."],
+  ["DELETE", "/v1/admin/keys/{prefix}", "Revoke a key."],
 ] as const;
 
 export default function Docs() {
@@ -25,9 +28,59 @@ export default function Docs() {
       </div>
 
       <div className="mt-12 space-y-14">
+        <Section kicker="Authentication" title="Every data call needs a key">
+          <p>
+            <code className="text-ember-300">/v1/exposure</code>,{" "}
+            <code className="text-ember-300">/v1/exposure/summary</code>,{" "}
+            <code className="text-ember-300">/v1/assets</code> and{" "}
+            <code className="text-ember-300">/v1/geocode</code> require an API key. Send it
+            as either header:
+          </p>
+          <Code lang="http">{`X-API-Key: talaia_sk_…
+Authorization: Bearer talaia_sk_…`}</Code>
+          <Note kind="warn">
+            Keys are never accepted in a query string. A key in a URL leaks into access
+            logs, browser history and referrer headers, and cannot be un-leaked.
+          </Note>
+          <p>
+            Only a SHA-256 hash of each key is stored, alongside a short non-secret prefix
+            used for listing and revocation. Comparison is constant-time, and a key is shown
+            exactly once — at creation. A database dump yields no usable credentials.
+          </p>
+          <p>
+            <strong className="text-slate-200">Rate limiting</strong> is per key over a
+            sliding 60-second window, 120 requests/minute by default and settable per key.
+            Every response carries the remaining budget:
+          </p>
+          <Code lang="http">{`X-RateLimit-Limit: 120
+X-RateLimit-Remaining: 117
+
+# on exhaustion
+HTTP/1.1 429 Too Many Requests
+Retry-After: 60`}</Code>
+          <p>
+            <strong className="text-slate-200">Open without a key:</strong>{" "}
+            <code className="text-ember-300">/health</code>, this website, and the three
+            metadata endpoints — <code className="text-ember-300">/v1/sources</code>,{" "}
+            <code className="text-ember-300">/v1/taxonomy</code> and{" "}
+            <code className="text-ember-300">/v1/stats</code> — which describe the service
+            rather than returning exposure data. An operator can gate those too with{" "}
+            <code className="text-ember-300">TALAIA_PUBLIC_METADATA=false</code>.
+          </p>
+          <p className="text-sm">
+            Managing keys: <code className="text-ember-300">POST /v1/admin/keys</code>,{" "}
+            <code className="text-ember-300">GET /v1/admin/keys</code> (prefixes only) and{" "}
+            <code className="text-ember-300">DELETE /v1/admin/keys/{"{prefix}"}</code>,
+            guarded by a separate <code className="text-ember-300">X-Admin-Key</code>. The
+            admin surface returns 404 unless an admin key is configured, so it does not
+            advertise itself on deployments that do not use it.
+          </p>
+        </Section>
+
         <Section kicker="Quickstart" title="Your first call">
           <p>A bare polygon returns a complete report across every layer.</p>
           <Code lang="bash">{`curl -X POST "$TALAIA/v1/exposure" \\
+  -H "X-API-Key: $TALAIA_KEY" \\
   -H 'content-type: application/json' \\
   -d '{
     "aoi": {
@@ -40,6 +93,7 @@ export default function Docs() {
 aoi = {"type": "Polygon", "coordinates": [[[1.80, 41.71], [1.87, 41.71],
                                             [1.87, 41.755], [1.80, 41.755], [1.80, 41.71]]]}
 r = httpx.post(f"{TALAIA}/v1/exposure",
+               headers={"X-API-Key": TALAIA_KEY},
                json={"aoi": aoi, "layers": ["healthcare", "social_care", "livestock"]},
                timeout=120).json()
 
@@ -58,7 +112,9 @@ for a in r["assets"][:5]:
                   <tr key={p} className="border-b border-slate-800/70 last:border-0">
                     <td className="w-16 px-3 py-2.5 align-top">
                       <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
-                        m === "GET" ? "bg-sky-500/15 text-sky-300" : "bg-emerald-500/15 text-emerald-300"}`}>{m}</span>
+                        m === "GET" ? "bg-sky-500/15 text-sky-300"
+                        : m === "DELETE" ? "bg-rose-500/15 text-rose-300"
+                        : "bg-emerald-500/15 text-emerald-300"}`}>{m}</span>
                     </td>
                     <td className="px-3 py-2.5 align-top font-mono text-[13px] text-ember-300">{p}</td>
                     <td className="px-3 py-2.5 align-top text-slate-400">{d}</td>
@@ -125,6 +181,7 @@ aoi = {"type": "FeatureCollection", "features": [
 
 # 2. what is inside each band
 report = httpx.post(f"{TALAIA}/v1/exposure",
+                    headers={"X-API-Key": TALAIA_KEY},
                     json={"aoi": aoi, "buffer_m": 250}, timeout=180).json()
 
 # 3. hand the agent a compact, ranked briefing
@@ -219,7 +276,9 @@ evacuate_first = [a for a in report["assets"]
 
         <Section kicker="Errors" title="What failure looks like">
           <p>
-            <code className="text-ember-300">422</code> for an invalid AOI or one exceeding the area
+            <code className="text-ember-300">401</code> for a missing, invalid or revoked API key;
+            <code className="text-ember-300"> 429</code> when the key's per-minute budget is spent;
+            <code className="text-ember-300"> 422</code> for an invalid AOI or one exceeding the area
             limit; <code className="text-ember-300">404</code> from the geocoder when nothing matches;
             <code className="text-ember-300"> 500</code> with a typed envelope for anything unhandled.
             Upstream degradation is never an error — it is a warning on a complete response.
