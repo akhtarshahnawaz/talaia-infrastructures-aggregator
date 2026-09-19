@@ -12,10 +12,15 @@ const ENDPOINTS = [
   ["POST", "/v1/signup", "Self-service: create an account, get a key. Open."],
   ["GET", "/v1/tiers", "Tier limits. Open."],
   ["GET", "/v1/me", "Your tier, limits and usage today."],
+  ["GET", "/v1/regions", "Named regions available for cache warming, with tile counts. Open."],
+  ["GET", "/v1/coverage", "How much of each region is already cached. Open."],
   ["GET", "/health", "Liveness and row counts. Open."],
+  ["POST", "/mcp", "Model Context Protocol endpoint. Same key, same limits."],
   ["POST", "/v1/admin/keys", "Mint an API key. Guarded by X-Admin-Key."],
   ["GET", "/v1/admin/keys", "List keys — prefixes only, never secrets."],
+  ["PATCH", "/v1/admin/keys/{prefix}", "Re-tier a key in place, keeping its secret."],
   ["DELETE", "/v1/admin/keys/{prefix}", "Revoke a key."],
+  ["POST", "/v1/admin/warm", "Pre-load the map tile cache for a region."],
 ] as const;
 
 export default function Docs() {
@@ -170,11 +175,12 @@ for a in r["assets"][:5]:
             <table className="w-full text-sm">
               <tbody>
                 {ENDPOINTS.map(([m, p, d]) => (
-                  <tr key={p} className="border-b border-slate-800/70 last:border-0">
+                  <tr key={`${m} ${p}`} className="border-b border-slate-800/70 last:border-0">
                     <td className="w-16 px-3 py-2.5 align-top">
                       <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
                         m === "GET" ? "bg-sky-500/15 text-sky-300"
                         : m === "DELETE" ? "bg-rose-500/15 text-rose-300"
+                        : m === "PATCH" ? "bg-amber-500/15 text-amber-300"
                         : "bg-emerald-500/15 text-emerald-300"}`}>{m}</span>
                     </td>
                     <td className="px-3 py-2.5 align-top font-mono text-[13px] text-ember-300">{p}</td>
@@ -208,7 +214,7 @@ for a in r["assets"][:5]:
                   ["include_geometry", "bool", "true", "Return per-asset geometry."],
                   ["live_osm", "bool", "server", "Fetch missing OSM tiles. Set false for guaranteed-fast responses."],
                   ["conflate", "bool", "true", "Merge cross-source duplicates."],
-                  ["max_assets", "int", "20000", "Cap the returned array (summary still counts everything)."],
+                  ["max_assets", "int", "tier", "Cap the returned array (summary still counts everything). Clamped down to your tier's ceiling, never up."],
                   ["sort_by", "enum", "priority", "priority · distance · value · category"],
                 ].map(([f, t, d, m]) => (
                   <tr key={f} className="border-t border-slate-800/70">
@@ -260,6 +266,57 @@ evacuate_first = [a for a in report["assets"]
             same aggregates, no asset array, far less to push through an agent's context window.
             Pull the full asset detail only once something crosses a threshold.
           </Note>
+        </Section>
+
+        <Section kicker="Agents" title="Model Context Protocol">
+          <p>
+            The same service also speaks{" "}
+            <a href="https://modelcontextprotocol.io" className="text-ember-400 hover:text-ember-300">MCP</a>,
+            so an agent can ask what is at risk inside a perimeter as a tool call rather
+            than an HTTP request. Point an MCP client at{" "}
+            <code className="text-ember-300">POST /mcp</code> with your API key.
+          </p>
+          <Code lang="bash">{`curl -X POST "$TALAIA/mcp" \\
+  -H "X-API-Key: $TALAIA_KEY" \\
+  -H 'content-type: application/json' \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`}</Code>
+          <div className="overflow-hidden rounded-lg border border-slate-800">
+            <table className="w-full text-sm">
+              <tbody className="text-slate-400">
+                {[["talaia_exposure_summary", "Aggregates for an area. Cheap enough to poll as a perimeter evolves."],
+                  ["talaia_list_assets", "Individual assets ranked by triage score, with contacts and capacity."],
+                  ["talaia_geocode", "A Spanish address to coordinates."],
+                  ["talaia_taxonomy", "The category vocabulary, for the layers filter."],
+                  ["talaia_my_limits", "This key's tier, caps and usage today."],
+                  ["talaia_coverage", "Which regions are already cached."]].map(([n, d]) => (
+                  <tr key={n} className="border-b border-slate-800/70 last:border-0">
+                    <td className="px-3 py-2.5 align-top font-mono text-[13px] text-ember-300">{n}</td>
+                    <td className="px-3 py-2.5 align-top">{d}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p>
+            Areas are given either as GeoJSON or as{" "}
+            <code className="text-ember-300">lon</code>/<code className="text-ember-300">lat</code>/
+            <code className="text-ember-300">radius_km</code>, which is what language models
+            reliably produce. The circle is built with longitude scaled by cos(latitude), so
+            it is round on the ground rather than round in degrees.
+          </p>
+          <Note>
+            <strong className="text-slate-200">MCP is gated identically to REST.</strong> The
+            endpoint carries the same authentication dependency and each tool runs the same
+            limit check before the same report builder — one implementation, not two kept in
+            step. An over-limit request comes back as a tool result marked{" "}
+            <code className="text-ember-300">isError</code> with the reason in plain language,
+            so an agent can split the area and retry instead of seeing a bare 403.
+          </Note>
+          <p className="text-sm">
+            For clients that launch a local process, such as Claude Desktop,{" "}
+            <code className="text-ember-300">python -m talaia.mcp_stdio</code> bridges stdio to
+            the same endpoint.
+          </p>
         </Section>
 
         <Section kicker="Response" title="The asset record">

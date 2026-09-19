@@ -38,6 +38,13 @@ class Coverage:
         a0, b0, a1, b1 = self.bbox
         return not (x1 < a0 or x0 > a1 or y1 < b0 or y0 > b1)
 
+    def contains_point(self, lon: float, lat: float, *, pad_deg: float = 0.5) -> bool:
+        """Is this coordinate plausibly one of ours? Padded, because a coverage box is
+        a rough rectangle and a real asset can sit just outside it."""
+        a0, b0, a1, b1 = self.bbox
+        return (a0 - pad_deg <= lon <= a1 + pad_deg
+                and b0 - pad_deg <= lat <= b1 + pad_deg)
+
 
 # Convenience coverages used by the Spanish connectors.
 SPAIN = Coverage((-18.2, 27.5, 4.4, 43.9), "Spain")
@@ -90,7 +97,7 @@ class Connector(ABC):
         from ..taxonomy import get_subcategory
 
         started = datetime.now(timezone.utc).replace(tzinfo=None)
-        total, skipped, geocoded, batch = 0, 0, 0, []
+        total, skipped, geocoded, out_of_coverage, batch = 0, 0, 0, 0, []
         pending_geocode: list[RawAsset] = []
         try:
             async for raw in self.fetch():
@@ -107,6 +114,14 @@ class Connector(ABC):
                             skipped += 1
                             continue
                         wkt = point_wkt(*ll)
+                    # A coordinate outside the source's own declared coverage is a
+                    # mangled record, not a discovery: the Catalan registries publish a
+                    # handful of rows at longitude -81.9 and latitude 0.000009. They can
+                    # never match a real AOI, so they only ever distort statistics.
+                    if (item.lon is not None and item.lat is not None
+                            and not self.coverage.contains_point(item.lon, item.lat)):
+                        out_of_coverage += 1
+                        continue
                     spec = get_subcategory(item.subcategory)
                     batch.append({
                         "id": asset_id(self.meta.id, item.source_ref),
@@ -139,8 +154,9 @@ class Connector(ABC):
             if batch:
                 total += await store.upsert_assets(batch)
             await store.record_run(self.meta.id, "ok", total, started)
-            log.info("%s: ingested %s rows (%s geocoded, %s skipped for bad geometry)",
-                     self.meta.id, total, geocoded, skipped)
+            log.info("%s: ingested %s rows (%s geocoded, %s skipped for bad geometry, "
+                     "%s outside %s)", self.meta.id, total, geocoded, skipped,
+                     out_of_coverage, self.coverage.label)
             return total
         except Exception as exc:
             await store.record_run(self.meta.id, "error", total, started, str(exc)[:500])

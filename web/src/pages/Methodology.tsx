@@ -37,17 +37,26 @@ export default function Methodology() {
             Evaluating <code className="text-ember-300">ST_Intersects</code> against a stored geometry
             column costs roughly 0.13 ms per row, because every geometry blob must be deserialised.
             That makes the R-tree path degrade linearly with the number of matches. Reconstructing a
-            point from indexed lon/lat columns is about seven times cheaper, but scans the table.
+            point from indexed lon/lat columns is cheaper per row, but pays a fixed few
+            milliseconds to scan the table.
           </p>
           <p>
-            Neither wins everywhere, so the store estimates matches from AOI area × row density and
-            picks. Both paths return identical rows, so a wrong guess costs latency, never correctness.
+            Neither wins everywhere, so the store <strong className="text-slate-200">counts
+            the candidates exactly</strong> before choosing — four numeric comparisons per row,
+            2–5 ms, against queries costing hundreds. Both paths return identical rows, so a
+            wrong choice costs latency, never correctness.
           </p>
-          <Code lang="measured">{`AOI size      rows    R-tree      scan     chosen
- 2 km            9     2.9 ms    9.2 ms   R-tree
- 5 km           68    11.3 ms   26.9 ms   R-tree
-17 km          618   160.5 ms   36.9 ms   scan
-51 km        5,788  1401.3 ms   76.4 ms   scan   ← 18× faster`}</Code>
+          <Code lang="measured">{`candidates    R-tree      scan     chosen
+       103    10.9 ms   18.9 ms   R-tree
+     1,285   174.5 ms   61.4 ms   scan
+    19,474   295.0 ms  197.1 ms   scan
+   106,052   938.3 ms 1020.3 ms   R-tree`}</Code>
+          <p>
+            It counts rather than estimating because an estimate cannot survive pre-caching.
+            Row density varies by two orders of magnitude between a city tile and open country,
+            and a single global average read a rural box holding 103 rows as 466 — choosing the
+            wrong plan for exactly the sparse queries the R-tree exists to serve.
+          </p>
         </Section>
 
         <Section kicker="Latency" title="Where the time actually goes">

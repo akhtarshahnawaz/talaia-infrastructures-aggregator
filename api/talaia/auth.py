@@ -71,6 +71,61 @@ TIERS: dict[str, Tier] = {
 }
 DEFAULT_TIER = "free"
 
+_TIER_FIELDS = {"rate_limit_per_min": int, "daily_quota": int, "max_aoi_km2": float,
+                "max_assets": int, "live_osm": bool, "description": str}
+
+
+def apply_tier_overrides(raw: str | None = None) -> list[str]:
+    """Merge ``TALAIA_TIER_LIMITS`` over the built-in tiers.
+
+    Quotas are an operational dial, not a design decision: the right free-tier area cap
+    is whatever the box can serve on the day. Reading them from the environment means
+    retuning is a dashboard edit and a restart, not a code change and a rebuild.
+
+    A partial object patches an existing tier; an unknown name defines a new one on top
+    of the free-tier defaults. Returns the names that changed, for logging.
+    """
+    import json
+    from dataclasses import replace
+
+    text = (raw if raw is not None else settings.tier_limits or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        log.error("TALAIA_TIER_LIMITS is not valid JSON (%s); built-in tiers kept", exc)
+        return []
+    if not isinstance(parsed, dict):
+        log.error("TALAIA_TIER_LIMITS must be a JSON object; built-in tiers kept")
+        return []
+
+    changed: list[str] = []
+    for name, patch in parsed.items():
+        if not isinstance(patch, dict):
+            log.error("TALAIA_TIER_LIMITS[%r] must be an object; ignored", name)
+            continue
+        key = str(name).lower()
+        base = TIERS.get(key) or replace(TIERS[DEFAULT_TIER], name=key,
+                                         description=f"Custom tier {key!r}.")
+        fields = {}
+        for field, caster in _TIER_FIELDS.items():
+            if field in patch:
+                try:
+                    fields[field] = caster(patch[field])
+                except (TypeError, ValueError):
+                    log.error("TALAIA_TIER_LIMITS[%r].%s is not a %s; ignored",
+                              key, field, caster.__name__)
+        unknown = set(patch) - set(_TIER_FIELDS)
+        if unknown:
+            log.warning("TALAIA_TIER_LIMITS[%r]: ignoring unknown field(s) %s",
+                        key, ", ".join(sorted(unknown)))
+        if not fields:
+            continue
+        TIERS[key] = replace(base, name=key, **fields)
+        changed.append(key)
+    return changed
+
 
 def get_tier(name: str | None) -> Tier:
     return TIERS.get((name or DEFAULT_TIER).lower(), TIERS[DEFAULT_TIER])
@@ -151,10 +206,16 @@ class KeyRegistry:
             raw = raw.strip()
             if not raw:
                 continue
+            # Keys set by the operator through the environment are deliberately
+            # unlimited: they exist so the deployment owner can integrate without
+            # rate-limiting themselves. TALAIA_RATE_LIMIT_PER_MIN still applies unless
+            # it is set to 0. Everything else - area, quota, asset ceiling - is open.
+            spec = TIERS["unlimited"]
             self._by_hash[hash_key(raw)] = ApiKey(
                 key_hash=hash_key(raw), prefix=key_prefix(raw),
                 label=label or "env", rate_limit_per_min=settings.rate_limit_per_min,
-                source="env")
+                source="env", tier="unlimited", max_aoi_km2=spec.max_aoi_km2,
+                daily_quota=spec.daily_quota, max_assets=spec.max_assets)
 
     async def load(self, store) -> None:
         """Load env keys plus any stored keys. Mints a bootstrap key if none exist."""
@@ -163,17 +224,29 @@ class KeyRegistry:
         try:
             rows = await store.fetch(
                 "SELECT key_hash, prefix, label, tier, rate_limit_per_min, daily_quota, "
-                "max_aoi_km2, max_assets, email, revoked_at FROM api_keys")
+                "max_aoi_km2, max_assets, email, revoked_at, custom_limits FROM api_keys")
             for (key_hash, prefix, label, tier, limit, quota, max_aoi, max_assets,
-                 email, revoked_at) in rows:
+                 email, revoked_at, custom) in rows:
                 if revoked_at is not None:
                     continue
+                spec = get_tier(tier)
+                if custom:
+                    # An admin set these by hand; a tier retune must not overwrite them.
+                    limits = dict(rate_limit_per_min=int(limit or 0),
+                                  max_aoi_km2=float(max_aoi or 0),
+                                  daily_quota=int(quota or 0),
+                                  max_assets=int(max_assets or spec.max_assets))
+                else:
+                    # Resolve from the CURRENT tier definition rather than the values
+                    # frozen at creation, so raising a tier's cap moves every key on it
+                    # instead of only the ones issued afterwards.
+                    limits = dict(rate_limit_per_min=spec.rate_limit_per_min,
+                                  max_aoi_km2=spec.max_aoi_km2,
+                                  daily_quota=spec.daily_quota,
+                                  max_assets=spec.max_assets)
                 self._by_hash[key_hash] = ApiKey(
                     key_hash=key_hash, prefix=prefix, label=label or "stored",
-                    rate_limit_per_min=int(limit or 0), source="store",
-                    tier=tier or DEFAULT_TIER, max_aoi_km2=float(max_aoi or 0),
-                    daily_quota=int(quota or 0),
-                    max_assets=int(max_assets or 20_000), email=email)
+                    source="store", tier=spec.name, email=email, **limits)
         except Exception as exc:  # pragma: no cover - table may not exist yet
             log.warning("could not load stored API keys: %s", exc)
         await self._restore_usage(store)
@@ -181,7 +254,11 @@ class KeyRegistry:
         self._loaded = True
         if settings.require_auth and not self._by_hash:
             raw = generate_key()
-            await self.create(store, label="bootstrap", raw=raw)
+            # Unlimited, not the signup default: this is the operator's only credential
+            # on a fresh deployment, printed once into the boot log. Handing them a key
+            # that refuses anything over 250 km2 would make the first real query fail
+            # with a quota error they have no obvious way to lift.
+            await self.create(store, label="bootstrap", raw=raw, tier="unlimited")
             self._bootstrap_key = raw
             log.warning(
                 "\n"
@@ -210,6 +287,8 @@ class KeyRegistry:
                      created_ip: str | None = None) -> tuple[str, ApiKey]:
         raw = raw or generate_key()
         spec = get_tier(tier)
+        custom = any(v is not None
+                     for v in (rate_limit_per_min, max_aoi_km2, daily_quota))
         record = ApiKey(
             key_hash=hash_key(raw), prefix=key_prefix(raw), label=label,
             rate_limit_per_min=(rate_limit_per_min if rate_limit_per_min is not None
@@ -221,15 +300,16 @@ class KeyRegistry:
         await store.execute_write(
             "INSERT OR REPLACE INTO api_keys "
             "(key_hash, prefix, label, tier, rate_limit_per_min, daily_quota, "
-            " max_aoi_km2, max_assets, email, organisation, created_ip, created_at, "
-            " revoked_at, last_used_at, request_count) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
+            " max_aoi_km2, max_assets, custom_limits, email, organisation, created_ip, "
+            " created_at, revoked_at, last_used_at, request_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
             [record.key_hash, record.prefix, label, record.tier,
              record.rate_limit_per_min, record.daily_quota, record.max_aoi_km2,
-             record.max_assets, email, organisation, created_ip,
+             record.max_assets, custom, email, organisation, created_ip,
              datetime.now(timezone.utc).replace(tzinfo=None)])
         self._by_hash[record.key_hash] = record
-        log.info("api key created: %s tier=%s (%s)", record.prefix, record.tier, label)
+        log.info("api key created: %s tier=%s%s (%s)", record.prefix, record.tier,
+                 " custom-limits" if custom else "", label)
         return raw, record
 
     async def revoke(self, store, prefix: str) -> bool:
@@ -246,23 +326,71 @@ class KeyRegistry:
         log.info("api key revoked: %s", prefix)
         return True
 
+    async def update(self, store, prefix: str, *, tier: str | None = None,
+                     rate_limit_per_min: int | None = None,
+                     max_aoi_km2: float | None = None,
+                     daily_quota: int | None = None) -> ApiKey | None:
+        """Re-tier or re-limit an existing key in place.
+
+        The secret is unchanged, so an upgrade does not force the holder to swap
+        credentials - which is the difference between "you are now on standard" and
+        "here is a new key, please redeploy".
+        """
+        rows = await store.fetch(
+            "SELECT key_hash FROM api_keys WHERE prefix = ? AND revoked_at IS NULL",
+            [prefix])
+        if not rows:
+            return None
+        key_hash = rows[0][0]
+        record = self._by_hash.get(key_hash)
+        spec = get_tier(tier) if tier else get_tier(record.tier if record else None)
+        custom = any(v is not None
+                     for v in (rate_limit_per_min, max_aoi_km2, daily_quota))
+        values = ApiKey(
+            key_hash=key_hash, prefix=prefix,
+            label=record.label if record else "stored", source="store", tier=spec.name,
+            rate_limit_per_min=(rate_limit_per_min if rate_limit_per_min is not None
+                                else spec.rate_limit_per_min),
+            max_aoi_km2=(max_aoi_km2 if max_aoi_km2 is not None else spec.max_aoi_km2),
+            daily_quota=(daily_quota if daily_quota is not None else spec.daily_quota),
+            max_assets=spec.max_assets, email=record.email if record else None)
+        await store.execute_write(
+            "UPDATE api_keys SET tier = ?, rate_limit_per_min = ?, daily_quota = ?, "
+            "max_aoi_km2 = ?, max_assets = ?, custom_limits = ? WHERE key_hash = ?",
+            [values.tier, values.rate_limit_per_min, values.daily_quota,
+             values.max_aoi_km2, values.max_assets, custom, key_hash])
+        self._by_hash[key_hash] = values
+        log.info("api key updated: %s -> tier=%s", prefix, values.tier)
+        return values
+
     async def list_keys(self, store) -> list[dict]:
         rows = await store.fetch(
-            "SELECT prefix, label, tier, rate_limit_per_min, daily_quota, max_aoi_km2, "
-            "email, created_at, revoked_at, request_count FROM api_keys "
-            "ORDER BY created_at DESC")
-        out = [{"prefix": p, "label": lbl, "tier": tier, "rate_limit_per_min": lim,
-                "daily_quota": quota, "max_aoi_km2": area, "email": email,
-                "created_at": created, "revoked_at": revoked,
+            "SELECT prefix, label, tier, email, created_at, revoked_at, request_count, "
+            "custom_limits FROM api_keys ORDER BY created_at DESC")
+        # Report the limits actually in force, which for an uncustomised key means the
+        # current tier definition rather than the columns written at creation time.
+        live_by_prefix = {k.prefix: k for k in self._by_hash.values()}
+        out = []
+        for p, lbl, tier, email, created, revoked, count, custom in rows:
+            live = live_by_prefix.get(p)
+            spec = get_tier(tier)
+            out.append({
+                "prefix": p, "label": lbl, "tier": tier,
+                "rate_limit_per_min": (live.rate_limit_per_min if live
+                                       else spec.rate_limit_per_min),
+                "daily_quota": live.daily_quota if live else spec.daily_quota,
+                "max_aoi_km2": live.max_aoi_km2 if live else spec.max_aoi_km2,
+                "custom_limits": bool(custom),
+                "email": email, "created_at": created, "revoked_at": revoked,
                 "request_count": count, "source": "store",
-                "used_today": self.used_today_by_prefix(p)}
-               for p, lbl, tier, lim, quota, area, email, created, revoked, count in rows]
+                "used_today": self.used_today_by_prefix(p)})
         for key in self._by_hash.values():
             if key.source == "env":
                 out.append({"prefix": key.prefix, "label": key.label, "tier": key.tier,
                             "rate_limit_per_min": key.rate_limit_per_min,
                             "daily_quota": key.daily_quota,
-                            "max_aoi_km2": key.max_aoi_km2, "email": None,
+                            "max_aoi_km2": key.max_aoi_km2, "custom_limits": False,
+                            "email": None,
                             "created_at": None, "revoked_at": None,
                             "request_count": None, "source": "env",
                             "used_today": self.used_today(key)})

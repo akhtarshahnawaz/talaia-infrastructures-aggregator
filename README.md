@@ -105,7 +105,10 @@ occupancy, replacement cost, a triage score and per-field provenance.
 | `POST` | `/v1/signup` | Self-service: create an account, receive a key. Open |
 | `GET` | `/v1/tiers` | Tier limits. Open |
 | `GET` | `/v1/me` | Your tier, limits and usage today |
-| `POST`/`GET`/`DELETE` | `/v1/admin/keys` | Mint, list and revoke API keys |
+| `GET` | `/v1/regions` · `/v1/coverage` | Warmable regions, and what is already cached |
+| `POST` | `/mcp` | Model Context Protocol endpoint, same auth and limits |
+| `POST`/`GET`/`PATCH`/`DELETE` | `/v1/admin/keys` | Mint, list, re-tier and revoke API keys |
+| `POST`/`GET`/`DELETE` | `/v1/admin/warm` | Start, poll and stop a tile-cache warm |
 
 ---
 
@@ -147,6 +150,12 @@ curl -X POST $TALAIA/v1/admin/keys -H "X-Admin-Key: $ADMIN" \
   -d '{"label":"deepfire-integration","tier":"unlimited"}'
 ```
 
+Or, simplest for your own integration, set `TALAIA_API_KEYS=deepfire:talaia_sk_…` —
+keys defined in the environment are unlimited by design.
+
+Tier quotas are tunable from the environment; an existing key can be re-tiered in place
+without changing its secret. See **[docs/LIMITS-AND-KEYS.md](docs/LIMITS-AND-KEYS.md)**.
+
 ### Sending the key
 
 Data endpoints — `/v1/exposure`, `/v1/exposure/summary`, `/v1/assets`, `/v1/geocode` —
@@ -181,8 +190,9 @@ curl -X DELETE localhost:8000/v1/admin/keys/talaia_sk_xTj2zp... -H "X-Admin-Key:
 With the service stopped (DuckDB is single-writer), the CLI does the same:
 
 ```bash
-PYTHONPATH=api python -m talaia key create --label deepfire-agent --limit 30
+PYTHONPATH=api python -m talaia key create --tier unlimited --label deepfire-integration
 PYTHONPATH=api python -m talaia key list
+PYTHONPATH=api python -m talaia key update talaia_sk_xTj2zp... --tier standard
 PYTHONPATH=api python -m talaia key revoke talaia_sk_xTj2zp...
 ```
 
@@ -194,6 +204,53 @@ a 429 carries `Retry-After`.
 website, and the three metadata endpoints `/v1/sources`, `/v1/taxonomy`, `/v1/stats`,
 which describe the service rather than returning exposure data and are rendered by the
 public site. Set `TALAIA_PUBLIC_METADATA=false` to gate those too.
+
+---
+
+## Use it from an agent (MCP)
+
+TALAIA is also a [Model Context Protocol](https://modelcontextprotocol.io) server, so an
+agent can ask "what is at risk inside this perimeter" as a tool call.
+
+```bash
+curl -X POST $TALAIA/mcp -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Six tools: `talaia_exposure_summary`, `talaia_list_assets`, `talaia_geocode`,
+`talaia_taxonomy`, `talaia_my_limits`, `talaia_coverage`. Areas are given as GeoJSON or
+as `lon`/`lat`/`radius_km`, which is what models reliably emit.
+
+`/mcp` is mounted on the same app, behind the same `require_api_key` dependency, and each
+tool runs the same `_enforce_key_limits` → `build_report` pair as the REST handler — so
+**MCP is gated by exactly the same tiers, caps and quotas**, because there is one
+implementation rather than two kept in step. An over-limit request comes back as a tool
+result with `isError` and the reason in plain language, which an agent can act on.
+
+For stdio clients such as Claude Desktop, `python -m talaia.mcp_stdio` proxies to the
+same endpoint. Full guide: **[docs/MCP.md](docs/MCP.md)**.
+
+---
+
+## Pre-caching a demo region
+
+Registry data is already local. OpenStreetMap is fetched on demand and tile-cached, so a
+cold area pays an Overpass round-trip on its first request. Warm it in advance:
+
+```bash
+PYTHONPATH=api python -m talaia regions              # tile counts per region
+PYTHONPATH=api python -m talaia warm demo --dry-run  # cost before committing
+PYTHONPATH=api python -m talaia warm demo
+```
+
+Warms are resumable — the tile cache *is* the progress record — and can also run inside
+the live service via `POST /v1/admin/warm`, or at boot via `TALAIA_WARM_ON_BOOT`.
+`GET /v1/coverage` reports what is warm.
+
+Measured: 9 tiles of central Barcelona took 275 s and added 121k assets and 54 MB.
+Barcelona metro is 88 tiles; all of mainland Spain is 41,377, which is days of Overpass
+time and not worth attempting. Warm the areas you will actually show.
+**[docs/PRECACHING.md](docs/PRECACHING.md)** has the full arithmetic.
 
 ---
 
@@ -218,14 +275,24 @@ round-trip; the same area from cache returns in 1.9 ms.**
 
 Evaluating `ST_Intersects` against a stored geometry column costs ~0.13 ms/row (every
 blob must be deserialised), so the R-tree path degrades linearly with matches.
-Reconstructing a point from indexed lon/lat columns is ~7× cheaper but scans. The store
-estimates matches from AOI area × density and picks; both paths return identical rows.
+Reconstructing a point from indexed lon/lat columns is cheaper per row but pays a fixed
+few milliseconds to scan. Neither wins everywhere, so the store **counts the candidates
+exactly** — four DOUBLE comparisons per row, 2–5 ms — and picks. Both paths return
+identical rows, so a wrong choice costs latency, never correctness.
 
-| AOI | rows | R-tree | scan | chosen |
-|---|---|---|---|---|
-| 2 km | 9 | **2.9 ms** | 9.2 ms | R-tree |
-| 17 km | 618 | 160.5 ms | **36.9 ms** | scan |
-| 51 km | 5 788 | 1401.3 ms | **76.4 ms** | scan (18× faster) |
+Measured over 183k rows:
+
+| candidates | R-tree | scan | chosen |
+|---|---|---|---|
+| 103 | **10.9 ms** | 18.9 ms | R-tree |
+| 1,285 | 174.5 ms | **61.4 ms** | scan |
+| 19,474 | 295.0 ms | **197.1 ms** | scan |
+| 106,052 | **938.3 ms** | 1020.3 ms | R-tree |
+
+It counts rather than estimating because an estimate cannot survive pre-caching. Density
+varies by two orders of magnitude between a city tile and open country, and a global
+average read a rural box holding 103 rows as 466 — picking the wrong plan for the sparse
+queries the R-tree exists to serve.
 
 ### Measured end-to-end latency
 
@@ -305,6 +372,10 @@ live data rather than the documentation:
 
 **→ [Step-by-step Railway guide](docs/DEPLOY-RAILWAY.md)** — volume setup, variables,
 capturing the bootstrap key, minting your unlimited key, verification and troubleshooting.
+
+Related: **[LIMITS-AND-KEYS.md](docs/LIMITS-AND-KEYS.md)** (tiers, quotas, issuing keys) ·
+**[PRECACHING.md](docs/PRECACHING.md)** (warming a demo region) ·
+**[MCP.md](docs/MCP.md)** (agent access).
 
 Single service: a multi-stage Dockerfile (Rust → Node → Python) serves the API and the
 website from one process. Mount a volume at `/data`; an empty store self-bootstraps

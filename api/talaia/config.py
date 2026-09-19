@@ -36,6 +36,20 @@ class Settings(BaseSettings):
     # budget expires is used; the rest is abandoned and reported as a warning. An
     # incident commander cannot wait three minutes for a volunteer tile server.
     osm_deadline_s: float = 25.0
+    # How long a tile that failed upstream is left alone before a user request retries
+    # it. Without this, one permanently failing tile makes every request touching it pay
+    # the full deadline, for ever - a partially warmed region would be slower than a cold
+    # one. Bulk warming ignores the backoff, because retrying is the whole point there.
+    osm_error_retry_minutes: int = 30
+    # Regions warmed in the background at boot, comma separated. Names come from the
+    # gazetteer in talaia.regions, or "minlon,minlat,maxlon,maxlat" for a raw bbox.
+    # Empty means no pre-warming: tiles are fetched on first demand as usual.
+    warm_on_boot: str = ""
+    # Pacing for bulk warming. Deliberately gentler than the per-request path: a bulk
+    # warm is not latency-sensitive and Overpass is a donated public resource.
+    warm_max_parallel: int = 2
+    warm_pause_s: float = 1.0
+    warm_group_tiles: int = 16
 
     # --- upstream services ---------------------------------------------
     socrata_base: str = "https://analisi.transparenciacatalunya.cat/resource"
@@ -65,6 +79,12 @@ class Settings(BaseSettings):
     # Enables the runtime key-management endpoints when set.
     admin_key: str | None = None
     rate_limit_per_min: int = 120
+    # Per-tier limit overrides as JSON, so quotas can be retuned from the Railway
+    # dashboard without a code change or a rebuild. Partial objects are merged onto the
+    # built-in tier; an unknown name defines a new tier on top of the free-tier defaults.
+    #   {"free": {"max_aoi_km2": 500, "daily_quota": 5000},
+    #    "partner": {"max_aoi_km2": 10000, "rate_limit_per_min": 600}}
+    tier_limits: str = ""
     # /v1/sources, /v1/taxonomy and /v1/stats describe the service rather than returning
     # exposure data, and the public documentation site renders them. They stay open by
     # default; set this to false to gate absolutely everything.
@@ -81,6 +101,10 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / self.db_filename
+
+    @property
+    def warm_on_boot_list(self) -> list[str]:
+        return [r.strip() for r in self.warm_on_boot.split(",") if r.strip()]
 
     @property
     def overpass_mirror_list(self) -> list[str]:

@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .connectors import registry
 from .net import close_client
-from .auth import registry as key_registry
+from .auth import apply_tier_overrides, registry as key_registry
+from .mcp import mcp_router
 from .routers.v1 import (admin_router, meta_router, public_router,
                          router as v1_router)
 from .store import Store, get_store, set_store
@@ -91,9 +92,31 @@ async def _bootstrap(store) -> None:
     log.info("bootstrap complete: %s", await store.stats())
 
 
+async def _warm_on_boot(store) -> None:
+    """Pre-load the tile cache for the regions named in TALAIA_WARM_ON_BOOT.
+
+    Deliberately in the background and deliberately after the service is already
+    answering: a cold region degrades latency, it does not break anything, so there is
+    no reason to make the deployment wait for it.
+    """
+    from .regions import resolve_many
+    from .services.warm import warmer
+
+    try:
+        regions = resolve_many(settings.warm_on_boot_list)
+    except KeyError as exc:
+        log.error("TALAIA_WARM_ON_BOOT: %s", exc.args[0])
+        return
+    log.info("warming %s on boot", ", ".join(r.name for r in regions))
+    warmer.start(store, regions)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     registry.load_all()
+    changed = apply_tier_overrides()
+    if changed:
+        log.info("tier limits overridden from the environment: %s", ", ".join(changed))
     store = Store()
     store.connect()
     set_store(store)
@@ -113,9 +136,13 @@ async def lifespan(app: FastAPI):
         # empty volume self-heals, serving OSM-only results until the load completes.
         log.warning("store is empty - bootstrapping resident sources in the background")
         app.state.bootstrap_task = asyncio.create_task(_bootstrap(store))
+    if settings.warm_on_boot_list:
+        await _warm_on_boot(store)
     flusher = asyncio.create_task(_flush_usage_loop(store))
     yield
     flusher.cancel()
+    from .services.warm import warmer
+    await warmer.cancel()
     await key_registry.flush_usage(store)
     await close_client()
     store.close()
@@ -180,6 +207,9 @@ app.include_router(v1_router)
 app.include_router(meta_router)
 app.include_router(public_router)
 app.include_router(admin_router)
+# Mounted on the same app so MCP clients authenticate with the same key and consume
+# the same rate limit and quota as REST callers.
+app.include_router(mcp_router)
 
 # -- website ---------------------------------------------------------------
 if settings.web_dist.exists():

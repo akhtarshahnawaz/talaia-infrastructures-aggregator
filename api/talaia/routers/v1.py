@@ -28,6 +28,7 @@ from ..connectors import registry
 from ..geo import parse_aoi
 from ..models import (ExposureReport, ExposureRequest, GeocodeRequest, SignupRequest,
                       SourceStatus)
+from ..regions import REGIONS, catalogue as region_catalogue, resolve_many
 from ..services.aggregator import build_report
 from ..store import get_store
 from ..taxonomy import as_dict as taxonomy_dict
@@ -219,6 +220,47 @@ async def stats() -> dict[str, Any]:
     return data
 
 
+@meta_router.get("/regions", summary="Named regions available for cache warming")
+async def regions_list() -> dict[str, Any]:
+    """The gazetteer the warmer understands, with each region's tile count.
+
+    Tile count is the unit of cost: one tile is roughly one Overpass request's worth of
+    work, so it is the number to look at before asking for a region to be warmed.
+    """
+    return {"tile_deg": settings.osm_tile_deg, "regions": region_catalogue()}
+
+
+@meta_router.get("/coverage", summary="Which areas are already cached")
+async def coverage() -> dict[str, Any]:
+    """How much of each named region is warm.
+
+    Worth checking before a demo: a region reported at 100% answers from local storage in
+    milliseconds, while a cold one pays an Overpass round-trip on the first request.
+    """
+    store = get_store()
+    # INTERVAL takes a literal, not a bind parameter. The value is an int from
+    # configuration, never from the request, so interpolating it is safe here.
+    rows = await store.fetch(
+        "SELECT tile_key, min_lon, min_lat, feature_count FROM osm_tile_cache "
+        "WHERE status = 'ok' AND fetched_at > "
+        f"(current_timestamp - INTERVAL {int(settings.osm_tile_ttl_hours)} HOUR)")
+    fresh = {r[0]: (r[1], r[2], r[3] or 0) for r in rows}
+    deg = settings.osm_tile_deg
+    out = []
+    for region in REGIONS.values():
+        x0, y0, x1, y1 = region.bbox
+        hit = [v for v in fresh.values()
+               if x0 - deg <= v[0] <= x1 and y0 - deg <= v[1] <= y1]
+        total = region.tile_count()
+        out.append({"key": region.key, "name": region.name,
+                    "tiles_total": total, "tiles_cached": len(hit),
+                    "percent": round(100.0 * len(hit) / total, 1) if total else 0.0,
+                    "cached_features": sum(v[2] for v in hit)})
+    out.sort(key=lambda r: (-r["percent"], r["tiles_total"]))
+    return {"tile_deg": deg, "ttl_hours": settings.osm_tile_ttl_hours,
+            "fresh_tiles_total": len(fresh), "regions": out}
+
+
 # ---------------------------------------------------------------------------
 # Public - self-service access
 # ---------------------------------------------------------------------------
@@ -353,6 +395,91 @@ async def create_key(payload: dict[str, Any]) -> dict[str, Any]:
 @admin_router.get("/keys", summary="List keys (prefixes only, never secrets)")
 async def list_keys() -> list[dict[str, Any]]:
     return await key_registry.list_keys(get_store())
+
+
+@admin_router.patch("/keys/{prefix}", summary="Change a key's tier or limits")
+async def update_key(prefix: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Re-tier an existing key in place, keeping the secret.
+
+    This is how a self-service signup becomes an unlimited integration key without the
+    holder having to swap credentials.
+    """
+    tier = payload.get("tier")
+    if tier is not None and str(tier) not in TIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown tier {tier!r}. Available: {', '.join(TIERS)}.")
+    limit, area, quota = (payload.get("rate_limit_per_min"),
+                          payload.get("max_aoi_km2"), payload.get("daily_quota"))
+    record = await key_registry.update(
+        get_store(), prefix, tier=str(tier) if tier else None,
+        rate_limit_per_min=int(limit) if limit is not None else None,
+        max_aoi_km2=float(area) if area is not None else None,
+        daily_quota=int(quota) if quota is not None else None)
+    if record is None:
+        raise HTTPException(status_code=404, detail="No active key with that prefix.")
+    return {"prefix": record.prefix, "tier": record.tier, "limits": record.limits()}
+
+
+# ---------------------------------------------------------------------------
+# Admin - cache warming
+# ---------------------------------------------------------------------------
+@admin_router.post("/warm", summary="Pre-load the OSM tile cache for a region")
+async def start_warm(payload: dict[str, Any]) -> dict[str, Any]:
+    """Warm tiles in the background so a demo area answers from local storage.
+
+    Runs in this process on purpose. DuckDB takes one writer, and the API holds it while
+    it is up, so a separate CLI run would simply be locked out.
+
+    Pass ``dry_run`` to see the tile and block count without fetching anything.
+    """
+    from ..services.warm import estimate, warmer
+
+    names = payload.get("regions") or payload.get("region") or []
+    if isinstance(names, str):
+        names = [names]
+    if not names:
+        raise HTTPException(
+            status_code=422,
+            detail="Give 'regions': a list of region keys, group names or bboxes. "
+                   "See GET /v1/regions.")
+    try:
+        regions = resolve_many([str(n) for n in names])
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=exc.args[0]) from exc
+
+    est = estimate(regions)
+    if payload.get("dry_run"):
+        return {"dry_run": True, "regions": [r.key for r in regions], **est}
+    try:
+        progress = warmer.start(
+            get_store(), regions,
+            force=bool(payload.get("force")),
+            concurrency=payload.get("concurrency"),
+            pause_s=payload.get("pause_s"),
+            max_tiles=int(payload["max_tiles"]) if payload.get("max_tiles") else None)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"started": True, "regions": [r.key for r in regions], "estimate": est,
+            "progress": progress.as_dict(),
+            "poll": "GET /v1/admin/warm"}
+
+
+@admin_router.get("/warm", summary="Progress of the running or last warm")
+async def warm_status() -> dict[str, Any]:
+    from ..services.warm import warmer
+    return {"running": warmer.running, **warmer.progress.as_dict()}
+
+
+@admin_router.delete("/warm", summary="Stop the running warm")
+async def stop_warm() -> dict[str, Any]:
+    """Stops after the in-flight blocks finish. Tiles already fetched stay cached, so
+    restarting resumes rather than repeating."""
+    from ..services.warm import warmer
+    cancelled = await warmer.cancel()
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="No warm is running.")
+    return {"cancelled": True, **warmer.progress.as_dict()}
 
 
 @admin_router.delete("/keys/{prefix}", summary="Revoke a key by prefix")

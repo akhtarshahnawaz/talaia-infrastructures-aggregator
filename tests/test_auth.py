@@ -239,3 +239,117 @@ async def test_usage_counters_survive_a_restart(store):
     key = restarted.verify(raw)
     assert restarted.used_today(key) == 7, \
         "a restart must not hand everyone a fresh daily quota"
+
+
+# -- tier limits are an operational dial, not a code constant ----------------
+def test_tier_overrides_patch_only_the_named_fields(monkeypatch):
+    from dataclasses import replace
+    import talaia.auth as auth
+
+    original = dict(auth.TIERS)
+    try:
+        changed = auth.apply_tier_overrides('{"free": {"max_aoi_km2": 900}}')
+        assert changed == ["free"]
+        assert auth.TIERS["free"].max_aoi_km2 == 900
+        assert auth.TIERS["free"].daily_quota == original["free"].daily_quota, \
+            "untouched fields must survive"
+        assert auth.TIERS["standard"] == original["standard"]
+    finally:
+        auth.TIERS.clear(); auth.TIERS.update(original)
+
+
+def test_tier_overrides_can_define_a_new_tier():
+    import talaia.auth as auth
+    original = dict(auth.TIERS)
+    try:
+        auth.apply_tier_overrides('{"partner": {"max_aoi_km2": 8000}}')
+        assert auth.get_tier("partner").max_aoi_km2 == 8000
+        assert auth.get_tier("partner").rate_limit_per_min == original["free"].rate_limit_per_min
+    finally:
+        auth.TIERS.clear(); auth.TIERS.update(original)
+
+
+@pytest.mark.parametrize("bad", ["not json", "[1,2]", '{"free": 5}', '{"free": {"max_aoi_km2": "wide"}}'])
+def test_malformed_tier_overrides_keep_the_built_in_limits(bad):
+    """Getting this wrong must fail closed - a typo in an env var must not remove a cap."""
+    import talaia.auth as auth
+    original = dict(auth.TIERS)
+    try:
+        auth.apply_tier_overrides(bad)
+        assert auth.TIERS["free"].max_aoi_km2 == original["free"].max_aoi_km2
+    finally:
+        auth.TIERS.clear(); auth.TIERS.update(original)
+
+
+async def test_retuning_a_tier_moves_keys_already_issued_on_it(store):
+    """Raising the free cap must lift existing free keys, not only future ones."""
+    import talaia.auth as auth
+    original = dict(auth.TIERS)
+    try:
+        reg = KeyRegistry()
+        raw, record = await reg.create(store, label="early-bird", tier="free")
+        assert reg.verify(raw).max_aoi_km2 == original["free"].max_aoi_km2
+
+        auth.apply_tier_overrides('{"free": {"max_aoi_km2": 1200}}')
+        reloaded = KeyRegistry()
+        await reloaded.load(store)
+        assert reloaded.verify(raw).max_aoi_km2 == 1200
+    finally:
+        auth.TIERS.clear(); auth.TIERS.update(original)
+
+
+async def test_hand_set_per_key_limits_survive_a_tier_retune(store):
+    """The other half of the contract: an explicit override is not a tier default."""
+    import talaia.auth as auth
+    original = dict(auth.TIERS)
+    try:
+        reg = KeyRegistry()
+        raw, _ = await reg.create(store, label="special", tier="free", max_aoi_km2=77.0)
+
+        auth.apply_tier_overrides('{"free": {"max_aoi_km2": 1200}}')
+        reloaded = KeyRegistry()
+        await reloaded.load(store)
+        assert reloaded.verify(raw).max_aoi_km2 == 77.0
+    finally:
+        auth.TIERS.clear(); auth.TIERS.update(original)
+
+
+async def test_a_key_can_be_upgraded_without_changing_its_secret(store):
+    reg = KeyRegistry()
+    raw, record = await reg.create(store, label="signup", tier="free")
+    assert reg.verify(raw).unlimited_area is False
+
+    updated = await reg.update(store, record.prefix, tier="unlimited")
+    assert updated.tier == "unlimited"
+    assert reg.verify(raw).unlimited_area is True, "the same secret keeps working"
+
+    reloaded = KeyRegistry()
+    await reloaded.load(store)
+    assert reloaded.verify(raw).tier == "unlimited", "and it survives a restart"
+
+
+async def test_updating_an_unknown_prefix_reports_rather_than_creating(store):
+    reg = KeyRegistry()
+    assert await reg.update(store, "talaia_sk_ghost...", tier="unlimited") is None
+
+
+async def test_env_keys_are_unlimited_by_design(monkeypatch):
+    """TALAIA_API_KEYS is the operator's own way in; it must not be area-capped."""
+    monkeypatch.setattr(settings, "api_keys", "deepfire:talaia_sk_env_integration_key")
+    reg = KeyRegistry()
+    reg.load_env_keys()
+    key = reg.verify("talaia_sk_env_integration_key")
+    assert key is not None and key.tier == "unlimited"
+    assert key.unlimited_area is True
+    assert key.daily_quota == 0
+
+
+async def test_the_bootstrap_key_is_not_area_capped(store, monkeypatch):
+    """It is the operator's only credential on a fresh deploy, printed once into the
+    boot log. A 250 km2 cap on it would break the first real query."""
+    monkeypatch.setattr(settings, "require_auth", True)
+    monkeypatch.setattr(settings, "api_keys", "")
+    reg = KeyRegistry()
+    await reg.load(store)
+    key = reg.verify(reg.bootstrap_key)
+    assert key.tier == "unlimited" and key.unlimited_area is True

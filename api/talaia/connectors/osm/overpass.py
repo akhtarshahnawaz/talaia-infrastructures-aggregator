@@ -273,7 +273,17 @@ class OpenStreetMap(Connector):
             stats["warnings"].append(
                 f"{len(failures)}/{len(groups)} OpenStreetMap requests failed "
                 f"({type(failures[0]).__name__}); {len(failed_keys)} tile(s) in this area "
-                f"were not refreshed and will be retried on the next request.")
+                f"were not refreshed and will be retried after a short backoff.")
+            # Record the failure so the backoff in stale_tiles can see it. Without this a
+            # tile that cannot be fetched is simply absent from the cache, so it is stale
+            # on every request for ever, and each of those requests pays the full deadline
+            # retrying it. One dead tile would quietly make a whole area permanently slow.
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            await store.mark_tiles([
+                {"tile_key": k, "min_lon": by_key[k][0], "min_lat": by_key[k][1],
+                 "max_lon": by_key[k][2], "max_lat": by_key[k][3], "fetched_at": now,
+                 "status": "error", "feature_count": 0, "network_count": 0,
+                 "error": str(failures[0])[:200]} for k in failed_keys])
 
         if not fresh_keys:
             stats["ms"] = (time.perf_counter() - t_start) * 1000

@@ -92,6 +92,91 @@ async def cmd_query(args) -> int:
     return 0
 
 
+async def cmd_regions(args) -> int:
+    from talaia.regions import GROUPS, catalogue
+
+    print(f"{'key':<24} {'tiles':>7} {'km2':>10}  name")
+    for r in catalogue():
+        print(f"{r['key']:<24} {r['tiles']:>7,} {r['area_km2']:>10,}  {r['name']}")
+        if r["note"]:
+            print(f"{'':<24} {'':>7} {'':>10}  {r['note']}")
+    print("\ngroups:")
+    for name, members in sorted(GROUPS.items()):
+        print(f"  {name:<22} {', '.join(members)}")
+    print("\nA bbox works too: talaia warm 1.9,41.3,2.3,41.6")
+    return 0
+
+
+async def cmd_warm(args) -> int:
+    """Pre-load the OSM tile cache. The API process must be stopped: single writer."""
+    from talaia.regions import resolve_many
+    from talaia.services.warm import estimate, warm_regions
+
+    registry.load_all()
+    try:
+        regions = resolve_many(args.region)
+    except KeyError as exc:
+        log.error("%s", exc.args[0])
+        return 2
+
+    est = estimate(regions)
+    print(f"\nplan: {', '.join(r.name for r in regions)}")
+    print(f"  {est['tiles']:,} tiles of {est['tile_deg']}deg "
+          f"in {est['blocks']:,} request block(s) of up to {est['block_tiles']} tiles")
+    if args.dry_run:
+        # Pace from configuration rather than a hardcoded guess, so the number moves
+        # when the operator changes the pacing.
+        from talaia.config import settings as cfg
+        per = (cfg.warm_pause_s + 8.0) / max(args.concurrency or cfg.warm_max_parallel, 1)
+        print(f"  rough wall clock at current pacing: {est['blocks'] * per / 60:,.0f} min")
+        print("  (dry run - nothing fetched)")
+        return 0
+
+    store = Store(args.db) if args.db else Store()
+    store.connect(); set_store(store)
+    last = [0.0]
+
+    def report(p):
+        now = time.perf_counter()
+        if now - last[0] < 2.0 and p.blocks_done < p.blocks_total:
+            return
+        last[0] = now
+        eta = p.eta_s()
+        print(f"  {p.blocks_done:>5}/{p.blocks_total} blocks  "
+              f"{p.tiles_done:>6,} tiles  {p.assets:>7,} assets  "
+              f"{p.networks:>7,} networks  "
+              f"{'' if eta is None else f'eta {eta/60:,.0f} min'}", flush=True)
+
+    t0 = time.perf_counter()
+    try:
+        progress = await warm_regions(
+            store, regions, force=args.force, concurrency=args.concurrency,
+            pause_s=args.pause, max_tiles=args.max_tiles, on_block=report)
+    except ValueError as exc:
+        log.error("%s", exc)
+        store.close(); await close_client()
+        return 2
+    except KeyboardInterrupt:
+        print("\ninterrupted - everything fetched so far is cached; "
+              "re-run the same command to resume")
+        store.close(); await close_client()
+        return 130
+
+    print(f"\n--- warm complete in {time.perf_counter()-t0:,.0f}s ---")
+    print(f"  tiles fetched   {progress.tiles_done:,}")
+    print(f"  already fresh   {progress.tiles_already_fresh:,}")
+    print(f"  tiles failed    {progress.tiles_failed:,}")
+    print(f"  assets          {progress.assets:,}")
+    print(f"  networks        {progress.networks:,}")
+    if progress.errors:
+        print(f"  first error     {progress.errors[0]}")
+        print("  Failed tiles stay stale; re-run to retry them.")
+    print("\nstore:", json.dumps(await store.stats(), indent=None))
+    store.close()
+    await close_client()
+    return 0 if not progress.tiles_failed else 1
+
+
 async def cmd_key(args) -> int:
     """Manage API keys offline. The API process must be stopped: DuckDB is single-writer.
 
@@ -107,22 +192,52 @@ async def cmd_key(args) -> int:
     try:
         await key_registry.load(store)
         if args.action == "create":
+            from talaia.auth import TIERS
+            if args.tier not in TIERS:
+                log.error("unknown tier %r; available: %s", args.tier,
+                          ", ".join(TIERS))
+                return 2
             raw, record = await key_registry.create(
-                store, label=args.label, rate_limit_per_min=args.limit)
+                store, label=args.label, tier=args.tier,
+                rate_limit_per_min=args.limit, max_aoi_km2=args.max_area,
+                daily_quota=args.daily_quota, email=args.email)
             print("\nAPI key created. This is shown ONCE and cannot be recovered:\n")
             print(f"    {raw}\n")
             print(f"  label {record.label}   prefix {record.prefix}   "
-                  f"limit {record.rate_limit_per_min}/min")
+                  f"tier {record.tier}")
+            for field, value in record.limits().items():
+                print(f"  {field:<20} {value}")
+        elif args.action == "update":
+            from talaia.auth import TIERS
+            if args.tier and args.tier not in TIERS:
+                log.error("unknown tier %r; available: %s", args.tier,
+                          ", ".join(TIERS))
+                return 2
+            record = await key_registry.update(
+                store, args.prefix, tier=args.tier,
+                rate_limit_per_min=args.limit, max_aoi_km2=args.max_area,
+                daily_quota=args.daily_quota)
+            if record is None:
+                print(f"no active key with prefix {args.prefix!r}")
+                return 1
+            print(f"{record.prefix} is now tier {record.tier}")
+            for field, value in record.limits().items():
+                print(f"  {field:<20} {value}")
         elif args.action == "list":
             keys = await key_registry.list_keys(store)
             if not keys:
                 print("no API keys configured")
             else:
-                print(f"{'prefix':<22} {'label':<20} {'limit':>6} {'source':<7} {'status'}")
+                print(f"{'prefix':<22} {'label':<18} {'tier':<10} {'area km2':>9} "
+                      f"{'req/min':>8} {'source':<7} {'status'}")
                 for k in keys:
                     status = "revoked" if k["revoked_at"] else "active"
-                    print(f"{k['prefix']:<22} {(k['label'] or ''):<20} "
-                          f"{k['rate_limit_per_min'] or '-':>6} {k['source']:<7} {status}")
+                    area = k["max_aoi_km2"] or 0
+                    print(f"{k['prefix']:<22} {(k['label'] or '')[:18]:<18} "
+                          f"{(k['tier'] or '-'):<10} "
+                          f"{('unlimited' if not area else f'{area:,.0f}'):>9} "
+                          f"{(k['rate_limit_per_min'] or 'unlimited'):>8} "
+                          f"{k['source']:<7} {status}")
         elif args.action == "revoke":
             ok = await key_registry.revoke(store, args.prefix)
             print("revoked" if ok else f"no active key with prefix {args.prefix!r}")
@@ -145,11 +260,36 @@ def main() -> int:
     ps.set_defaults(fn=cmd_stats)
 
     pk = sub.add_parser("key", help="manage API keys (stop the server first)")
-    pk.add_argument("action", choices=["create", "list", "revoke"])
-    pk.add_argument("prefix", nargs="?", help="key prefix, for revoke")
+    pk.add_argument("action", choices=["create", "list", "revoke", "update"])
+    pk.add_argument("prefix", nargs="?", help="key prefix, for revoke and update")
     pk.add_argument("--label", default="cli", help="human label for the key")
-    pk.add_argument("--limit", type=int, default=None, help="requests per minute")
+    pk.add_argument("--tier", default="free",
+                    help="free | standard | unlimited (default: free)")
+    pk.add_argument("--email", default=None, help="contact address for the key")
+    pk.add_argument("--limit", type=int, default=None,
+                    help="requests per minute; 0 for unlimited. Overrides the tier.")
+    pk.add_argument("--max-area", type=float, default=None, dest="max_area",
+                    help="max km2 per request; 0 for unlimited. Overrides the tier.")
+    pk.add_argument("--daily-quota", type=int, default=None, dest="daily_quota",
+                    help="requests per day; 0 for unlimited. Overrides the tier.")
     pk.set_defaults(fn=cmd_key)
+
+    pw = sub.add_parser("warm", help="pre-load the OSM tile cache for a region")
+    pw.add_argument("region", nargs="+",
+                    help="region key, group, or 'min_lon,min_lat,max_lon,max_lat'")
+    pw.add_argument("--dry-run", action="store_true",
+                    help="show the tile and block count without fetching")
+    pw.add_argument("--force", action="store_true",
+                    help="refetch tiles even if they are still fresh")
+    pw.add_argument("--concurrency", type=int, default=None)
+    pw.add_argument("--pause", type=float, default=None,
+                    help="seconds between requests (default: TALAIA_WARM_PAUSE_S)")
+    pw.add_argument("--max-tiles", type=int, default=None, dest="max_tiles",
+                    help="refuse to start if the plan exceeds this many tiles")
+    pw.set_defaults(fn=cmd_warm)
+
+    pr = sub.add_parser("regions", help="list the regions warm understands")
+    pr.set_defaults(fn=cmd_regions)
 
     pq = sub.add_parser("query", help="query a polygon")
     pq.add_argument("aoi", help="GeoJSON file path or inline GeoJSON")

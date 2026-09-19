@@ -16,7 +16,7 @@ import json
 import logging
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -96,6 +96,7 @@ class Store:
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS email VARCHAR",
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS organisation VARCHAR",
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS created_ip VARCHAR",
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS custom_limits BOOLEAN DEFAULT FALSE",
     ]
 
     def _migrate(self) -> None:
@@ -238,35 +239,57 @@ class Store:
 
     # -- spatial reads -----------------------------------------------------
     # -- query planning ----------------------------------------------------
-    # Measured on this hardware (100k rows): evaluating ST_Intersects against the stored
-    # GEOMETRY column costs ~0.13 ms/row because each blob must be deserialised, so the
-    # R-tree path degrades linearly with matches. Reconstructing a point from the lon/lat
-    # DOUBLE columns is ~7x cheaper but scans the table. The crossover is a few hundred
-    # matched rows, so we estimate matches from AOI area x row density and pick a path.
-    # Both paths return identical rows; a bad guess costs latency, never correctness.
+    # Evaluating ST_Intersects against the stored GEOMETRY column costs roughly 0.13 ms
+    # per row because each blob must be deserialised, so the R-tree path degrades
+    # linearly with matches. Reconstructing a point from the lon/lat DOUBLE columns is
+    # several times cheaper but pays a fixed few milliseconds to scan the table.
+    #
+    # Measured over 183k rows: at ~100 candidates the R-tree wins by about the scan's
+    # fixed cost; from ~500 to ~100k candidates the scan wins, by 65-77% at the small
+    # end; above ~100k the two converge to within noise. So the rule is simply "R-tree
+    # only when there is almost nothing to find", and the crossover sits in the low
+    # hundreds. Both paths return identical rows; a bad guess costs latency, never
+    # correctness.
     _RTREE_ROW_BUDGET = 250
 
+    # ST_Intersects on both branches, not ST_Within on the point one. Within excludes a
+    # point lying exactly on the boundary while the R-tree path's ST_Intersects includes
+    # it, so the two plans disagreed on assets sitting on the AOI edge - and which plan
+    # runs is an optimisation decision the caller cannot see. Registry coordinates are
+    # rounded to 6 decimals and fire perimeters come off a raster, so landing exactly on
+    # an edge is common enough to matter.
     _EXACT_PRED = (
         "CASE WHEN geometry_kind = 'point' "
-        "THEN ST_Within(ST_Point(lon, lat), ST_GeomFromText(?)) "
+        "THEN ST_Intersects(ST_Point(lon, lat), ST_GeomFromText(?)) "
         "ELSE ST_Intersects(geom, ST_GeomFromText(?)) END"
     )
 
     def _density(self) -> float:
-        """Rows per square degree over the populated extent. Cached, cheap to refresh."""
+        """Rows per square degree over the populated extent. Cached, cheap to refresh.
+
+        The extent comes from the 1st and 99th percentiles, not min/max. Registries
+        publish the occasional mangled coordinate - a Catalan sports centre at longitude
+        -81.9, a farm at latitude 0.000009 - and with min/max a single such row stretches
+        the extent across an ocean, collapsing the density estimate by three orders of
+        magnitude. The planner then reads every AOI as sparse and always picks the R-tree,
+        which is precisely the wrong plan for the dense urban areas this is meant to
+        protect. Percentiles make the estimate indifferent to a handful of bad rows.
+        """
         if self._density_cache is not None:
             return self._density_cache
         try:
             with self.cursor() as cur:
                 row = cur.execute(
-                    "SELECT count(*), min(lon), max(lon), min(lat), max(lat) FROM assets"
+                    "SELECT count(*), quantile_cont(lon, 0.01), quantile_cont(lon, 0.99),"
+                    " quantile_cont(lat, 0.01), quantile_cont(lat, 0.99) FROM assets"
                 ).fetchone()
             n, x0, x1, y0, y1 = row
             if not n or x0 is None:
                 self._density_cache = 0.0
             else:
+                # The percentile window holds 98% of rows in each axis, so scale back up.
                 area = max((x1 - x0) * (y1 - y0), 1e-6)
-                self._density_cache = n / area
+                self._density_cache = (n * 0.98 * 0.98) / area
         except Exception:
             self._density_cache = 0.0
         return self._density_cache
@@ -274,10 +297,30 @@ class Store:
     def invalidate_density(self) -> None:
         self._density_cache = None
 
-    def choose_strategy(self, bbox: tuple[float, float, float, float]) -> str:
+    def choose_strategy(self, bbox: tuple[float, float, float, float],
+                        table: str = "assets") -> str:
+        """Pick a plan from an exact candidate count, not an area-times-density guess.
+
+        Counting rows whose stored bbox overlaps the AOI costs 2-5 ms on this data - four
+        DOUBLE comparisons per row, vectorised, no index - against queries costing
+        hundreds of milliseconds. Paying that buys an exact number instead of an estimate
+        that is wrong by whatever the local density happens to be: measured here, a rural
+        box holding 103 rows estimated at 466, because the average is dominated by
+        Barcelona. Density varies by two orders of magnitude between a city tile and the
+        countryside, so no single global figure can plan both, and pre-caching a country
+        makes the spread worse rather than better.
+        """
         x0, y0, x1, y1 = bbox
-        estimated = max((x1 - x0) * (y1 - y0), 0.0) * self._density()
-        return "rtree" if estimated <= self._RTREE_ROW_BUDGET else "scan"
+        try:
+            with self.cursor() as cur:
+                n = cur.execute(
+                    f"SELECT count(*) FROM {table} WHERE bbox_max_lon >= ? "
+                    f"AND bbox_min_lon <= ? AND bbox_max_lat >= ? AND bbox_min_lat <= ?",
+                    [x0, x1, y0, y1]).fetchone()[0]
+        except Exception:
+            # Fall back to the estimate rather than failing the query outright.
+            n = max((x1 - x0) * (y1 - y0), 0.0) * self._density()
+        return "rtree" if n <= self._RTREE_ROW_BUDGET else "scan"
 
     def _query_assets(self, wkt: str, bbox: tuple[float, float, float, float],
                       categories: Sequence[str] | None, limit: int,
@@ -369,22 +412,46 @@ class Store:
         return await asyncio.to_thread(self._query_population, wkt)
 
     # -- tile cache --------------------------------------------------------
-    def _stale_tiles(self, tile_keys: list[str], ttl_hours: int) -> set[str]:
+    def _stale_tiles(self, tile_keys: list[str], ttl_hours: int,
+                     error_backoff_minutes: int) -> set[str]:
+        """Tiles worth fetching now.
+
+        A tile is skipped if it is fresh, **or** if it failed upstream recently. The
+        second clause matters: a tile whose fetch fails is never fresh, so without a
+        backoff every request covering it retries and pays the full OSM deadline. One
+        permanently broken tile would then make a warmed region slower than a cold one.
+        Bulk warming passes a zero backoff, because retrying is exactly its job.
+        """
         if not tile_keys:
             return set()
+        # Cutoffs are computed in Python and bound, NOT derived from the database's
+        # current_timestamp. DuckDB's current_timestamp is session-local while fetched_at
+        # is written as naive UTC, so on a machine at UTC+2 the two differ by two hours.
+        # A 14-day TTL absorbs that silently; a 30-minute backoff does not - it simply
+        # never matches, and the bug is invisible because the only symptom is a retry
+        # that should not have happened.
+        now = _utcnow()
+        ttl_cutoff = now - timedelta(hours=int(ttl_hours))
+        error_cutoff = (now - timedelta(minutes=int(error_backoff_minutes))
+                        if error_backoff_minutes > 0 else None)
         placeholders = ",".join("?" * len(tile_keys))
         sql = f"""
             SELECT tile_key FROM osm_tile_cache
-            WHERE tile_key IN ({placeholders}) AND status = 'ok'
-              AND fetched_at > (current_timestamp - INTERVAL {int(ttl_hours)} HOUR)
+            WHERE tile_key IN ({placeholders})
+              AND ((status = 'ok' AND fetched_at > ?)
+                OR (status <> 'ok' AND ? IS NOT NULL AND fetched_at > ?))
         """
         with self.cursor() as cur:
-            fresh = {r[0] for r in cur.execute(sql, tile_keys).fetchall()}
-        return set(tile_keys) - fresh
+            skip = {r[0] for r in cur.execute(
+                sql, [*tile_keys, ttl_cutoff, error_cutoff, error_cutoff]).fetchall()}
+        return set(tile_keys) - skip
 
-    async def stale_tiles(self, tile_keys: list[str], ttl_hours: int | None = None) -> set[str]:
+    async def stale_tiles(self, tile_keys: list[str], ttl_hours: int | None = None,
+                          error_backoff_minutes: int | None = None) -> set[str]:
         ttl = settings.osm_tile_ttl_hours if ttl_hours is None else ttl_hours
-        return await asyncio.to_thread(self._stale_tiles, tile_keys, ttl)
+        backoff = (settings.osm_error_retry_minutes if error_backoff_minutes is None
+                   else error_backoff_minutes)
+        return await asyncio.to_thread(self._stale_tiles, tile_keys, ttl, backoff)
 
     def _mark_tiles(self, tiles: list[dict]) -> None:
         import pandas as pd

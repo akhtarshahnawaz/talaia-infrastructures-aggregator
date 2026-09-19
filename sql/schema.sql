@@ -120,6 +120,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
     daily_quota        INTEGER DEFAULT 0,
     max_aoi_km2        DOUBLE  DEFAULT 0,
     max_assets         INTEGER DEFAULT 20000,
+    -- FALSE means "follow whatever this tier currently allows", so retuning a
+    -- tier moves every key on it. TRUE pins the per-key values an admin set by
+    -- hand, which a tier change must not silently overwrite.
+    custom_limits      BOOLEAN DEFAULT FALSE,
     email              VARCHAR,
     organisation       VARCHAR,
     created_ip         VARCHAR,

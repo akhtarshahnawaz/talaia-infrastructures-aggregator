@@ -313,6 +313,52 @@ long asset array.
 
 ---
 
+## 9b. Two front doors, one enforcement point
+
+The service is consumed two ways: HTTP by programs, and MCP by agents. They are the same
+code path, not two implementations.
+
+```
+           POST /v1/exposure            POST /mcp
+                   │                        │
+                   ├──── require_api_key ───┤     auth, rate limit, daily quota
+                   │                        │
+                   ├── _enforce_key_limits ─┤     area cap, asset ceiling
+                   │                        │
+                   └────── build_report ────┘     one aggregator
+```
+
+The obvious way to build the MCP server would be a second service holding its own copy of
+the limit logic. That fails the first time a quota changes, and it fails silently and in
+the direction of letting people through — the tool simply answers. Mounting MCP on the
+same app behind the same dependency makes divergence impossible rather than unlikely.
+
+The two differ only in response shaping. REST returns the full report to a program; MCP
+returns a text summary plus structured content, capped at 200 assets, because the
+consumer is a context window and a megabyte of JSON there is both useless and expensive.
+
+The stdio bridge (`talaia.mcp_stdio`) is a pure proxy for the same reason: anything it
+could decide locally, an attacker could decide locally too, by running their own copy.
+
+## 9c. Pre-caching as a first-class operation
+
+Tier B is the only tier with cold-start cost, so warming it is an explicit operation
+rather than something that happens by accident.
+
+The per-request warm and the bulk warm have opposite constraints. The request path has a
+25-second deadline and abandons what has not arrived, because someone is waiting. The
+bulk path has no deadline, runs two requests in parallel with a pause between them, and
+commits after every block — because nobody is waiting and the real risk is being refused
+by a donated Overpass mirror.
+
+Resumption needs no state of its own: **the tile cache is the progress record**. A warm is
+"fetch the tiles that are stale", run repeatedly, so an interrupted run resumes by being
+re-run. Failed tiles are recorded with their error and left stale, which makes retry the
+default rather than something to remember.
+
+Because a warm writes, and DuckDB takes one writer, it must run inside the serving
+process when the service is up — hence `POST /v1/admin/warm` rather than a cron job.
+
 ## 10. Deployment
 
 Single Railway service. Multi-stage Dockerfile: Rust builder → Node builder (website) →

@@ -108,6 +108,12 @@ TALAIA_OSM_DEADLINE_S=25
 # Keep under the container's memory limit.
 TALAIA_DUCKDB_MEMORY_LIMIT=1GB
 TALAIA_DUCKDB_THREADS=4
+
+# Pre-load the OpenStreetMap tile cache for your demo areas in the background at boot,
+# so the first query does not pay an Overpass round-trip. Warm what you will show:
+# `demo` is 364 tiles and takes a few hours; all of Spain is 41,377 and is not worth
+# attempting. See docs/PRECACHING.md.
+TALAIA_WARM_ON_BOOT=demo
 ```
 
 ### Optional
@@ -125,6 +131,10 @@ TALAIA_PUBLIC_METADATA=false
 
 # Restrict browser origins that may call the API.
 TALAIA_CORS_ORIGINS=https://your-frontend.example
+
+# Retune tier quotas without redeploying code. Partial objects patch the built-in tier.
+# Malformed JSON is ignored and logged, so a typo cannot silently remove a cap.
+TALAIA_TIER_LIMITS={"free":{"max_aoi_km2":500,"daily_quota":5000}}
 ```
 
 ---
@@ -293,6 +303,30 @@ store, or adding an authenticated admin re-ingest endpoint that runs in-process.
 
 OpenStreetMap needs no maintenance: tiles refresh themselves when their 14-day TTL
 expires.
+
+### Warming the tile cache on a live deployment
+
+The same single-writer constraint rules out a cron warm, so the admin endpoint runs it
+**inside** the serving process. The API keeps answering throughout.
+
+```bash
+# What it would cost, before committing to it
+curl -X POST $TALAIA/v1/admin/warm -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' -d '{"regions":["demo"],"dry_run":true}'
+
+# Start it, with a guard against an accidentally huge region
+curl -X POST $TALAIA/v1/admin/warm -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' -d '{"regions":["demo"],"max_tiles":500}'
+
+curl -s $TALAIA/v1/admin/warm -H "X-Admin-Key: $ADMIN"        # progress and ETA
+curl -X DELETE $TALAIA/v1/admin/warm -H "X-Admin-Key: $ADMIN" # stop
+curl -s $TALAIA/v1/coverage                                    # what is warm
+```
+
+Warms resume: re-running skips tiles that are still fresh. A run reports `partial` or
+`failed` rather than `done` if tiles did not land, and failed tiles stay stale so the
+next run retries them. Expect Overpass to start refusing after sustained bulk fetching —
+pace with `TALAIA_WARM_PAUSE_S` and come back later rather than pushing through.
 
 ### Backups
 
