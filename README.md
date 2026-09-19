@@ -101,6 +101,7 @@ occupancy, replacement cost, a triage score and per-field provenance.
 | `GET` | `/v1/sources` | Live source catalogue (the website renders this) |
 | `GET` | `/v1/taxonomy` | 17 categories, 116 subcategories, scoring parameters |
 | `GET` | `/v1/stats` · `/health` | Store contents, liveness |
+| `POST` | `/v1/population` | Population surface only — skips assets, OSM, conflation and scoring |
 | `POST` | `/v1/geocode` | CartoCiudad passthrough, cached |
 | `POST` | `/v1/signup` | Self-service: create an account, receive a key. Open |
 | `GET` | `/v1/tiers` | Tier limits. Open |
@@ -229,6 +230,10 @@ are exposed:
   ]
 }
 ```
+
+`POST /v1/population` returns the same surface on its own, skipping the asset inventory,
+the OpenStreetMap fetch, conflation and scoring — most of the work in a full report — so
+it is the endpoint to poll when you want a map rather than a list of sites.
 
 The per-cell `population_in_aoi` values sum to `total` exactly. Cell polygons are
 included when `include_geometry` is also set. The list is capped at the 5,000 densest
@@ -367,6 +372,8 @@ them (100 vs 77). Near-misses are never dropped — they carry `possible_duplica
 
 Rendered live at `/sources`. Currently loaded:
 
+**Catalonia — regional registries**
+
 | Source | Publisher | Rows | Notes |
 |---|---|---|---|
 | `es.cat.schools` | Dept. d'Educació | 5 434 | Pinned to the latest `curs`; phone + email |
@@ -375,8 +382,34 @@ Rendered live at `/sources`. Currently loaded:
 | `es.cat.livestock` | DARP (REGA) | 19 889 | Merged per holding; DMS coordinates |
 | `es.cat.reses` | Dept. Drets Socials | 3 889 | Care homes — geocoded, no coordinates published |
 | `es.cat.munipoints` | ICGC | 947 | Municipal centroids, low-confidence fallback |
+
+**Spain — national registries**
+
+| Source | Publisher | Rows | Notes |
+|---|---|---|---|
+| `es.msan.hospitales` | Ministerio de Sanidad | 825 | Catálogo Nacional de Hospitales — **staffed bed counts** |
+| `es.msan.siap` | Ministerio de Sanidad | 13 408 | Primary care and urgent care centres (SIAP) |
+| `es.csic.carehomes` | CSIC Envejecimiento en Red | 5 383 | Care homes with **licensed places** and published coordinates |
+| `es.meq.schools` | Ministerio de Educación | 35 327 | Registro Estatal de Centros Docentes — directory, no enrolment |
 | `es.ine.popgrid` | Eurostat GISCO / INE | 63 522 | 1 km census population cells |
+
+**Everywhere**
+
+| Source | Publisher | Rows | Notes |
+|---|---|---|---|
 | `osm` | OpenStreetMap | on demand | Global; roads, footprints, contacts |
+
+Three of the four national registries publish addresses but no coordinates, so they are
+geocoded through CartoCiudad at ingest — measured at 11 req/s with a 100 % match rate at
+street-number precision, about 75 minutes for a cold national load, cached permanently
+afterwards. `coverage_regime` on every response says which regime an AOI is in.
+
+Two honest substitutions, both documented in `connectors/es/spain.py`:
+**REGCESS** publishes no bulk extract (it is a Struts search app that returns 500 to
+scripted queries), so `es.msan.siap` loads the same Ministry's machine-readable catalogue
+of the same centres. And the national school registry is a **directory, not a statistical
+return** — it has no pupil counts, because enrolment is published per community, which is
+why `es.cat.enrolments` has no national twin.
 
 Adding a country is a connector plus a crosswalk entry — storage, conflation, valuation,
 scoring, the API and the docs pick it up automatically.

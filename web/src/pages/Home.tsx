@@ -149,7 +149,7 @@ export default function Home() {
             <ul className="mt-4 space-y-3 text-[15px] text-slate-400">
               <li><strong className="text-slate-200">Three storage tiers.</strong> National registries live locally; OpenStreetMap is materialised on demand into a fixed tile cache; per-asset lookups are cached forever. Latency is bounded by cache misses, not data volume.</li>
               <li><strong className="text-slate-200">An adaptive query planner.</strong> The store counts an AOI&rsquo;s candidate rows exactly — 2–5 ms — then picks between an R-tree probe and a vectorised scan. Up to 3× either way, identical results.</li>
-              <li><strong className="text-slate-200">Usable by an agent, not only a program.</strong> The same service is an MCP server, behind the same key and the same limits, returning summaries sized for a context window rather than megabytes of JSON.</li>
+              <li><strong className="text-slate-200">Usable by an agent, not only a program.</strong> The same service is an <Link to="/mcp" className="text-ember-400 hover:text-ember-300">MCP server</Link>, behind the same key and the same limits, returning summaries sized for a context window rather than megabytes of JSON.</li>
               <li><strong className="text-slate-200">A Rust numeric core.</strong> Band assignment, distance-to-front and rollups run in Rust, with a NumPy fallback that a parity test proves equivalent.</li>
               <li><strong className="text-slate-200">Nothing is asserted without a source.</strong> Every field carries provenance; every estimate carries its method and confidence.</li>
             </ul>

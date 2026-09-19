@@ -161,6 +161,41 @@ async def geocode_endpoint(req: GeocodeRequest) -> dict[str, Any]:
     return result
 
 
+@router.post("/population", summary="Resident population as a grid surface")
+async def population(req: ExposureRequest,
+                     key: ApiKey | None = Depends(require_api_key)) -> dict[str, Any]:
+    """Census population for the AOI, broken down by 1 km grid cell.
+
+    The same figures `/v1/exposure` returns under `population`, but without building the
+    asset inventory - no store scan for assets, no OpenStreetMap fetch, no conflation and
+    no scoring. That is most of the work in a full report, so this is the endpoint to
+    poll when you want a population surface to map rather than a list of sites.
+
+    Cells come back densest first, each with its full population, the share inside the
+    AOI, and the earliest band covering its centroid. Set `include_geometry` for cell
+    polygons.
+    """
+    req = _enforce_key_limits(req, key)
+    req = req.model_copy(update={
+        "include_assets": False, "include_networks": False,
+        "include_population": True, "include_population_grid": True,
+        # Nothing here needs OpenStreetMap: the grid is a resident source, so an
+        # Overpass round-trip would add seconds and change no number in the response.
+        "live_osm": False, "conflate": False})
+    try:
+        report = await build_report(req, get_store())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "request_id": report.request_id, "generated_at": report.generated_at,
+        "aoi_bbox": report.aoi_bbox,
+        "area_km2": report.summary.aoi_area_km2,
+        "population": report.population,
+        "warnings": report.warnings,
+        "timing": report.timing,
+    }
+
+
 @router.get("/me", summary="What your key is allowed to do")
 async def me(key: ApiKey | None = Depends(require_api_key)) -> dict[str, Any]:
     """Your tier, limits and usage so far today.

@@ -8,6 +8,7 @@ const ENDPOINTS = [
   ["GET", "/v1/sources", "Live catalogue of connectors with licence, coverage and load status."],
   ["GET", "/v1/taxonomy", "The closed vocabulary with per-subcategory scoring parameters."],
   ["GET", "/v1/stats", "What the store currently holds."],
+  ["POST", "/v1/population", "Population surface only — no assets, no OSM, no scoring."],
   ["POST", "/v1/geocode", "CartoCiudad passthrough, cached."],
   ["POST", "/v1/signup", "Self-service: create an account, get a key. Open."],
   ["GET", "/v1/tiers", "Tier limits. Open."],
@@ -317,7 +318,8 @@ evacuate_first = [a for a in report["assets"]
           <p className="text-sm">
             For clients that launch a local process, such as Claude Desktop,{" "}
             <code className="text-ember-300">python -m talaia.mcp_stdio</code> bridges stdio to
-            the same endpoint.
+            the same endpoint. Full guide on the{" "}
+            <Link to="/mcp" className="text-ember-400 hover:text-ember-300">agents page</Link>.
           </p>
         </Section>
 
@@ -414,6 +416,12 @@ evacuate_first = [a for a in report["assets"]
       "band": "0-1h" }
   ]
 }`}</Code>
+          <p>
+            <code className="text-ember-300">POST /v1/population</code> returns the same
+            surface on its own, skipping the asset inventory, the OpenStreetMap fetch,
+            conflation and scoring — most of the work in a full report. Use it when you
+            want a map rather than a list of sites.
+          </p>
           <p>
             The per-cell <code className="text-ember-300">population_in_aoi</code> values sum
             to <code className="text-ember-300">total</code> exactly. Cell polygons are

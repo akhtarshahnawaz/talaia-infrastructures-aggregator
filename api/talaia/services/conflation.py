@@ -37,7 +37,9 @@ SOURCE_PRIORITY: dict[str, int] = {
     "es.cat.schools": 95,
     "es.cat.livestock": 92,
     "es.cat.reses": 88,
-    "es.msan.regcess": 86,
+    # SIAP rather than REGCESS: REGCESS publishes no bulk extract, and SIAP is the same
+    # Ministry's machine-readable directory of the same centres. See connectors/es/spain.py.
+    "es.msan.siap": 86,
     "es.csic.carehomes": 82,
     "es.meq.schools": 80,
     "es.cat.equipaments": 78,

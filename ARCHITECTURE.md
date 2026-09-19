@@ -379,6 +379,8 @@ self-heals and serves OSM-only results in the meantime rather than serving nothi
 * **Not a fire model.** TALAIA consumes perimeters; it does not predict them.
 * **Coverage is uneven.** Catalonia is deep (six dedicated registries); the rest of Spain is
   national-registry + OSM; outside Spain is OSM-only. The API says which regime you are in.
-* **Licences differ.** The CSIC care-home dataset is CC BY-NC-SA 4.0 — non-commercial. Each
-  source carries its licence in `/v1/sources` and in the response's `sources` block, so a
-  downstream user can filter on it.
+* **Licences differ.** The CSIC care-home dataset is the restrictive one: its terms forbid
+  use for advertising, sale or commercialisation and require a citation, so it is flagged
+  `commercial_use: false`. It names no Creative Commons identifier, so neither does TALAIA.
+  Each source carries its licence in `/v1/sources` and in the response's `sources` block,
+  so a downstream user can filter on it.

@@ -5,11 +5,13 @@ import Docs from "./pages/Docs";
 import Sources from "./pages/Sources";
 import Methodology from "./pages/Methodology";
 import Signup from "./pages/Signup";
+import Mcp from "./pages/Mcp";
 
 const LINKS = [
   ["/", "Overview"],
   ["/playground", "Playground"],
   ["/docs", "API docs"],
+  ["/mcp", "Agents (MCP)"],
   ["/sources", "Data sources"],
   ["/methodology", "Methodology"],
   ["/signup", "Get a key"],
@@ -58,6 +60,7 @@ export default function App() {
           <Route path="/docs" element={<Docs />} />
           <Route path="/sources" element={<Sources />} />
           <Route path="/methodology" element={<Methodology />} />
+          <Route path="/mcp" element={<Mcp />} />
           <Route path="/signup" element={<Signup />} />
           <Route path="*" element={<Home />} />
         </Routes>
