@@ -234,3 +234,41 @@ def test_rows_without_geometry_or_overlap_are_skipped():
             {**_row("nolon", 2.0, 41.0, 10), "lon": None}]
     cells, _, _ = _build_cells(rows, [], with_geometry=False)
     assert [c.cell_id for c in cells] == ["ok"]
+
+
+# ---------------------------------------------------------------------------
+# Geocoding a batch
+# ---------------------------------------------------------------------------
+async def test_a_batch_resolves_each_distinct_address_only_once(monkeypatch):
+    """Registry addresses repeat heavily, and every worker reads the cache before any
+    of them writes it - so without dedup each duplicate costs a live request. This was
+    a third of the traffic on the national school load."""
+    import talaia.connectors.es.cartociudad as cc
+
+    calls: list[str] = []
+
+    async def fake(query, store=None):
+        calls.append(query)
+        return {"lon": 1.0, "lat": 41.0, "query": query}
+
+    monkeypatch.setattr(cc, "geocode", fake)
+    queries = ["A", "B", "A", "A", "C", "B"]
+    out = await cc.geocode_many(queries, None)
+
+    assert sorted(calls) == ["A", "B", "C"], "one request per distinct address"
+    assert [r["query"] for r in out] == queries, "results map back to every position"
+
+
+async def test_blank_queries_are_not_sent_upstream(monkeypatch):
+    import talaia.connectors.es.cartociudad as cc
+
+    calls: list[str] = []
+
+    async def fake(query, store=None):
+        calls.append(query)
+        return {"lon": 1.0, "lat": 41.0}
+
+    monkeypatch.setattr(cc, "geocode", fake)
+    out = await cc.geocode_many(["", "X", ""], None)
+    assert calls == ["X"]
+    assert out[0] is None and out[2] is None and out[1] is not None

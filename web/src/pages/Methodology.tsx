@@ -61,14 +61,23 @@ export default function Methodology() {
 
         <Section kicker="Latency" title="Where the time actually goes">
           <p>
-            Warm store, live OpenStreetMap disabled, over the Catalan dataset (62k assets,
-            63k population cells):
+            Store query time, live OpenStreetMap disabled, measured over the full store —
+            357k assets, of which 250k are OpenStreetMap features in a warmed Barcelona:
           </p>
-          <Code lang="measured">{`AOI      assets   store   conflate   score    total
- 2 km       561    58ms      86ms   130ms    309ms
- 5 km     2,502   231ms     452ms   369ms   1.30s
-17 km     5,135   270ms     548ms   822ms   2.19s
-34 km     6,741   369ms     648ms   881ms   2.53s`}</Code>
+          <Code lang="measured">{`AOI       matched assets   strategy   store query
+ 2 km               4,786       scan        151 ms
+ 5 km              47,863       scan        631 ms
+17 km             195,822       scan       2,220 ms
+34 km          200,000 (cap)    scan       2,171 ms`}</Code>
+          <p>
+            These are far larger row counts than the same areas returned before the national
+            registries and the Barcelona tile warm — a 17 km circle over a warmed city now
+            matches nearly 200,000 assets, and the cost is materialising them rather than
+            finding them. For an interactive response, narrow{" "}
+            <code className="text-ember-300">layers</code>, use{" "}
+            <code className="text-ember-300">/v1/exposure/summary</code>, or query a fire
+            perimeter rather than a circle around a city centre.
+          </p>
           <p>
             Conflation originally dominated this table at 11.3 s for the 17 km case. Two
             structural fixes brought it to 0.55 s: anchoring pair comparison on the asset

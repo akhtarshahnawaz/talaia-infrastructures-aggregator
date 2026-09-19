@@ -30,9 +30,17 @@ def test_only_the_hash_is_a_credential():
     assert k not in h
     assert hash_key(k) == hash_key(k)
     assert hash_key(k) != hash_key(generate_key())
-    # The displayed prefix must not be enough to reconstruct the key.
-    assert len(key_prefix(k)) < len(k)
-    assert not k.startswith(key_prefix(k).replace("...", "") + "X")
+    # The displayed prefix must not be enough to reconstruct the key. Measure how much
+    # it actually withholds rather than probing one arbitrary next character - the old
+    # assertion here checked that the key did not continue with "X", which fails roughly
+    # one run in sixty-four purely because token_urlsafe sometimes emits an X.
+    shown = key_prefix(k)
+    assert shown.endswith("...")
+    revealed = shown[:-3]
+    assert k.startswith(revealed), "the prefix must identify the key it came from"
+    withheld = len(k) - len(revealed)
+    assert withheld >= 32, (
+        f"only {withheld} characters withheld; the prefix would be brute-forceable")
 
 
 async def test_unknown_and_revoked_keys_are_rejected(store):

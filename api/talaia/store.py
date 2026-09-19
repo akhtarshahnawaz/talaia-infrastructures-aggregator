@@ -564,6 +564,12 @@ class Store:
                 "  SELECT DISTINCT source_id FROM assets"
                 "  UNION SELECT DISTINCT source_id FROM networks"
                 "  UNION SELECT DISTINCT source_id FROM pop_grid)"),
+            # Rows-by-category, so a caller can see what the store is actually made of
+            # rather than inferring it from one total.
+            "assets_by_category": dict(self._fetch(
+                "SELECT category, count(*) FROM assets GROUP BY 1 ORDER BY 2 DESC")),
+            "assets_by_source": dict(self._fetch(
+                "SELECT source_id, count(*) FROM assets GROUP BY 1 ORDER BY 2 DESC")),
             "db_size_mb": round(self.db_path.stat().st_size / 1e6, 2)
             if self.db_path.exists() else 0.0,
         })

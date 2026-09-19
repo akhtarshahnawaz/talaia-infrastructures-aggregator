@@ -35,6 +35,7 @@ export default function Docs() {
         <a href="/swagger" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">Swagger UI ↗</a>
         <a href="/redoc" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">ReDoc ↗</a>
         <a href="/openapi.json" id="openapi" className="rounded-md border border-slate-700 px-3 py-1.5 text-slate-300 hover:border-slate-500">openapi.json ↗</a>
+        <a href="https://github.com/akhtarshahnawaz/talaia-infrastructures-aggregator/blob/main/docs/API.md" className="rounded-md border border-ember-700 bg-ember-500/10 px-3 py-1.5 text-ember-300 hover:border-ember-500">Full reference ↗</a>
       </div>
 
       <div className="mt-12 space-y-14">

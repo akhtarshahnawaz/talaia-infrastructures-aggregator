@@ -56,8 +56,23 @@ export default function Home() {
         {stats && (
           <div className="mt-12 grid grid-cols-2 gap-3 sm:grid-cols-4">
             <Stat label="Assets held locally" value={num(stats.assets)} sub="resident tier, queried in ms" />
-            <Stat label="Network features" value={num(stats.networks)} sub="roads, power, rail" />
-            <Stat label="Sources loaded" value={num(stats.sources)} sub="registries + OSM" />
+            <Stat
+              label="Network features"
+              value={num(stats.networks)}
+              /* Roads and power lines come only from OpenStreetMap, which is fetched per
+                 tile on demand — so a freshly deployed instance genuinely holds none
+                 until an area is queried or warmed. Saying that is better than showing a
+                 bare 0 that reads like a broken counter. */
+              sub={stats.networks ? `roads, power, rail · ${num(stats.cached_tiles)} tiles cached`
+                                  : "OpenStreetMap-derived — appears as tiles are cached"}
+            />
+            <Stat
+              label="Sources loaded"
+              value={stats.sources_registered
+                ? `${num(stats.sources)} / ${num(stats.sources_registered)}`
+                : num(stats.sources)}
+              sub="holding rows / registered"
+            />
             <Stat label="Numeric core" value={stats.core_impl === "rust" ? "Rust" : "NumPy"} sub={`${num(stats.db_size_mb, 1)} MB on disk`} />
           </div>
         )}

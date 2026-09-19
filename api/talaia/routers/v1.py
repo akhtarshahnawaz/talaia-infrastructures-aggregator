@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -175,24 +176,50 @@ async def population(req: ExposureRequest,
     AOI, and the earliest band covering its centroid. Set `include_geometry` for cell
     polygons.
     """
+    import time
+    import uuid as _uuid
+
+    from ..services.population import population_for
+
     req = _enforce_key_limits(req, key)
-    req = req.model_copy(update={
-        "include_assets": False, "include_networks": False,
-        "include_population": True, "include_population_grid": True,
-        # Nothing here needs OpenStreetMap: the grid is a resident source, so an
-        # Overpass round-trip would add seconds and change no number in the response.
-        "live_osm": False, "conflate": False})
     try:
-        report = await build_report(req, get_store())
+        aoi = parse_aoi(req.aoi, buffer_metres=req.buffer_m,
+                        band_property=req.band_property,
+                        minutes_property=req.minutes_property)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if aoi.area_km2 > settings.max_aoi_km2:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"AOI area {aoi.area_km2:,.0f} km2 exceeds the "
+                    f"{settings.max_aoi_km2:,.0f} km2 limit"))
+
+    # Deliberately not build_report. That path queries assets, networks and
+    # OpenStreetMap before it ever reaches the population overlay, and none of those
+    # change a single number here - on a 28 km2 area it was 2.4 s of work to produce a
+    # figure the grid query alone answers in a fraction of that.
+    started = time.perf_counter()
+    result = await population_for(get_store(), aoi, aoi.bands, include_cells=True,
+                                  with_geometry=req.include_geometry)
+    elapsed = round((time.perf_counter() - started) * 1000, 1)
+
+    warnings: list[str] = []
+    if result.cells_truncated:
+        warnings.append(
+            f"Population grid truncated to the {len(result.cells):,} densest cells of "
+            f"{result.cell_count:,}. 'total' still counts every cell; only the "
+            f"per-cell list is cut.")
+    if result.method == "no_grid_coverage":
+        warnings.append("No census population grid covers this area.")
+
     return {
-        "request_id": report.request_id, "generated_at": report.generated_at,
-        "aoi_bbox": report.aoi_bbox,
-        "area_km2": report.summary.aoi_area_km2,
-        "population": report.population,
-        "warnings": report.warnings,
-        "timing": report.timing,
+        "request_id": f"req_{_uuid.uuid4().hex[:12]}",
+        "generated_at": datetime.now(timezone.utc),
+        "aoi_bbox": [round(v, 6) for v in aoi.bbox],
+        "area_km2": round(aoi.area_km2, 4),
+        "population": result,
+        "warnings": warnings,
+        "timing": {"total_ms": elapsed, "store_query_ms": elapsed},
     }
 
 
@@ -252,6 +279,14 @@ async def stats() -> dict[str, Any]:
     data = await store.stats()
     data["core_impl"] = __import__("talaia.core_shim", fromlist=["impl"]).impl()
     data["auth_required"] = settings.require_auth
+    # "sources" counts the ones holding rows. Without the registered total beside it, a
+    # cold deploy reports 0 sources while /v1/sources lists a dozen, and the two numbers
+    # look like a contradiction rather than a loading state.
+    data["sources_registered"] = len(registry.all_connectors())
+    # Linear features come only from OpenStreetMap - no registry publishes them - so this
+    # count tracks tile-cache warmth, not the registry load.
+    data["networks_note"] = ("Linear features are OpenStreetMap-derived and appear as the "
+                             "tile cache warms; registries publish no road or power data.")
     return data
 
 

@@ -231,9 +231,10 @@ are exposed:
 }
 ```
 
-`POST /v1/population` returns the same surface on its own, skipping the asset inventory,
-the OpenStreetMap fetch, conflation and scoring — most of the work in a full report — so
-it is the endpoint to poll when you want a map rather than a list of sites.
+`POST /v1/population` returns the same surface on its own, taking a shortcut past the
+report builder entirely — assets, OpenStreetMap and conflation change none of these
+numbers. Measured on a 28 km² area: **2,664 ms through the full report, 10 ms direct**,
+identical figures. It is the endpoint to poll when you want a map rather than a list.
 
 The per-cell `population_in_aoi` values sum to `total` exactly. Cell polygons are
 included when `include_geometry` is also set. The list is capped at the 5,000 densest
@@ -440,6 +441,9 @@ live data rather than the documentation:
 
 **→ [Step-by-step Railway guide](docs/DEPLOY-RAILWAY.md)** — volume setup, variables,
 capturing the bootstrap key, minting your unlimited key, verification and troubleshooting.
+
+**→ [Full API reference](docs/API.md)** — every endpoint, every field, what each number
+means and how each estimate was made. Written to be read end to end by an agent.
 
 Related: **[LIMITS-AND-KEYS.md](docs/LIMITS-AND-KEYS.md)** (tiers, quotas, issuing keys) ·
 **[PRECACHING.md](docs/PRECACHING.md)** (warming a demo region) ·
