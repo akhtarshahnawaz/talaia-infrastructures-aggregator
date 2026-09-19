@@ -180,3 +180,15 @@ def test_currency_formatting_is_readable():
     assert _eur(1_500_000_000) == "EUR 1.5bn"
     assert _eur(2_400_000) == "EUR 2.4m"
     assert _eur(950) == "EUR 950"
+
+
+def test_the_website_does_not_claim_a_route_the_api_owns():
+    """The API serves /mcp, and the SPA catch-all sits behind it - so a marketing page
+    routed at /mcp is unreachable in a browser and answers 401 instead. It lives at
+    /agents; this pins that so the clash cannot come back silently."""
+    import pathlib
+
+    app_tsx = pathlib.Path(__file__).resolve().parents[1] / "web" / "src" / "App.tsx"
+    source = app_tsx.read_text()
+    assert 'path="/agents"' in source
+    assert 'path="/mcp"' not in source, "/mcp belongs to the API, not the website"

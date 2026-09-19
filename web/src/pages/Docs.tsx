@@ -320,7 +320,7 @@ evacuate_first = [a for a in report["assets"]
             For clients that launch a local process, such as Claude Desktop,{" "}
             <code className="text-ember-300">python -m talaia.mcp_stdio</code> bridges stdio to
             the same endpoint. Full guide on the{" "}
-            <Link to="/mcp" className="text-ember-400 hover:text-ember-300">agents page</Link>.
+            <Link to="/agents" className="text-ember-400 hover:text-ember-300">agents page</Link>.
           </p>
         </Section>
 

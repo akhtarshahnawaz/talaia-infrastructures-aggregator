@@ -12,7 +12,7 @@ const LINKS = [
   ["/", "Overview"],
   ["/playground", "Playground"],
   ["/docs", "API docs"],
-  ["/mcp", "Agents (MCP)"],
+  ["/agents", "Agents (MCP)"],
   ["/sources", "Data sources"],
   ["/roadmap", "Roadmap"],
   ["/methodology", "Methodology"],
@@ -62,7 +62,7 @@ export default function App() {
           <Route path="/docs" element={<Docs />} />
           <Route path="/sources" element={<Sources />} />
           <Route path="/methodology" element={<Methodology />} />
-          <Route path="/mcp" element={<Mcp />} />
+          <Route path="/agents" element={<Mcp />} />
           <Route path="/roadmap" element={<Roadmap />} />
           <Route path="/signup" element={<Signup />} />
           <Route path="*" element={<Home />} />
