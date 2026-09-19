@@ -47,6 +47,7 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
   // MapLibre only has sources after its `load` event. Without gating the data effects
   // on this, the initial AOI is silently dropped because getSource() returns undefined.
   const [ready, setReady] = useState(false);
+  const observerRef = useRef<ResizeObserver | null>(null);
   const onVertexRef = useRef(onVertex);
   const drawingRef = useRef(drawing);
   onVertexRef.current = onVertex;
@@ -59,9 +60,20 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
       attributionControl: { compact: true },
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    // Covers the rest: a sidebar opening, an orientation change, or a font load
+    // reflowing the page after the map already settled on a size.
+    const observer = new ResizeObserver(() => m.resize());
+    observer.observe(ref.current);
+    observerRef.current = observer;
     m.addControl(new maplibregl.ScaleControl({ maxWidth: 110, unit: "metric" }), "bottom-left");
 
     m.on("load", () => {
+      // MapLibre measures its container once, at construction. If the pane is still
+      // being laid out at that moment the map keeps a stale size and paints nothing
+      // until some interaction forces a resize - which looked like a blank basemap that
+      // healed itself the instant you touched it. Ask for the measurement again once
+      // the style is up, and keep watching the container after that.
+      m.resize();
       m.addSource("aoi", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
       m.addLayer({ id: "aoi-fill", type: "fill", source: "aoi",
         paint: { "fill-color": ["coalesce", ["get", "color"], "#f97316"], "fill-opacity": 0.14 } });
@@ -110,7 +122,12 @@ export default function MapView({ drawing, vertices, onVertex, aoi, report }: Pr
       setReady(true);
     });
     map.current = m;
-    return () => { m.remove(); map.current = null; };
+    return () => {
+      observerRef.current?.disconnect();
+      observerRef.current = null;
+      m.remove();
+      map.current = null;
+    };
   }, []);
 
   useEffect(() => {

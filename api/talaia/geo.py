@@ -18,6 +18,14 @@ from shapely.ops import transform, unary_union
 EARTH_R = 6_371_008.8
 DEG_LAT_M = 111_320.0
 
+# Checked before anything reaches shapely. Without this an unknown type raises
+# GeometryTypeError, which is not a ValueError, so it escaped the router's 422 handling
+# and surfaced as a 500 with the exception class in the body.
+ACCEPTED_GEOMETRY_TYPES = frozenset({
+    "Polygon", "MultiPolygon", "Feature", "FeatureCollection",
+    "GeometryCollection", "Point", "MultiPoint", "LineString", "MultiLineString",
+})
+
 
 # ---------------------------------------------------------------------------
 # Bands
@@ -42,6 +50,10 @@ class AOI:
     union: BaseGeometry
     bands: list[Band]
     buffered_m: float = 0.0
+    # Ways the input was altered to make it usable. Surfaced on the response, because a
+    # caller whose geometry we silently changed is reasoning about a different shape
+    # than the one we measured.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def bbox(self) -> tuple[float, float, float, float]:
@@ -104,12 +116,47 @@ def buffer_m(geom: BaseGeometry, metres: float) -> BaseGeometry:
 # ---------------------------------------------------------------------------
 # AOI parsing
 # ---------------------------------------------------------------------------
-def _clean(geom: BaseGeometry) -> BaseGeometry:
+def _clean(geom: BaseGeometry, notes: list[str] | None = None) -> BaseGeometry:
     """Repair self-intersections; simulation output is frequently not OGC-valid."""
     if geom.is_valid:
         return geom
     fixed = geom.buffer(0)
-    return fixed if not fixed.is_empty else geom
+    if not fixed.is_empty:
+        if notes is not None:
+            notes.append("AOI geometry was not OGC-valid (self-intersecting or "
+                         "similar) and was repaired before use.")
+        return fixed
+    return geom
+
+
+def _ring_notes(geojson: dict, notes: list[str]) -> None:
+    """Record rings that RFC 7946 would reject, which shapely silently closes.
+
+    Accepting them is the right call for a tool fed by simulation output, but the caller
+    should be told their shape was altered rather than discover it from a boundary that
+    does not match theirs.
+    """
+    def walk(coords) -> bool:
+        if not isinstance(coords, list) or not coords:
+            return False
+        first = coords[0]
+        if isinstance(first, (int, float)):
+            return False
+        if isinstance(first, list) and first and isinstance(first[0], (int, float)):
+            return len(coords) < 4 or list(coords[0]) != list(coords[-1])
+        return any(walk(c) for c in coords)
+
+    gtype = geojson.get("type")
+    if gtype in ("Polygon", "MultiPolygon"):
+        if walk(geojson.get("coordinates") or []):
+            notes.append(
+                "AOI ring was not closed (RFC 7946 requires at least four positions "
+                "with the first equal to the last); it was closed automatically.")
+    elif gtype == "Feature":
+        _ring_notes(geojson.get("geometry") or {}, notes)
+    elif gtype == "FeatureCollection":
+        for feat in geojson.get("features") or []:
+            _ring_notes((feat or {}).get("geometry") or {}, notes)
 
 
 def _minutes_from(props: dict, minutes_property: str, label: str) -> float | None:
@@ -144,6 +191,12 @@ def parse_aoi(geojson: dict, *, buffer_metres: float = 0.0,
         raise ValueError("aoi must be a GeoJSON object with a 'type' member")
 
     gtype = geojson["type"]
+    if gtype not in ACCEPTED_GEOMETRY_TYPES:
+        raise ValueError(
+            f"aoi type {gtype!r} is not supported. Use one of: "
+            f"{', '.join(sorted(ACCEPTED_GEOMETRY_TYPES))}.")
+    notes: list[str] = []
+    _ring_notes(geojson, notes)
     raw_bands: list[tuple[str, BaseGeometry, float | None, dict]] = []
 
     if gtype == "FeatureCollection":
@@ -158,15 +211,15 @@ def parse_aoi(geojson: dict, *, buffer_metres: float = 0.0,
                         or props.get("label")
                         or props.get("name")
                         or f"band_{i}")
-            geom = _clean(shape(feat["geometry"]))
+            geom = _clean(shape(feat["geometry"]), notes)
             raw_bands.append((label, geom, _minutes_from(props, minutes_property, label), props))
     elif gtype == "Feature":
         props = geojson.get("properties") or {}
         label = str(props.get(band_property) or "aoi")
-        geom = _clean(shape(geojson["geometry"]))
+        geom = _clean(shape(geojson["geometry"]), notes)
         raw_bands.append((label, geom, _minutes_from(props, minutes_property, label), props))
     else:
-        raw_bands.append(("aoi", _clean(shape(geojson)), None, {}))
+        raw_bands.append(("aoi", _clean(shape(geojson), notes), None, {}))
 
     if not raw_bands:
         raise ValueError("aoi contains no usable geometry")
@@ -187,7 +240,8 @@ def parse_aoi(geojson: dict, *, buffer_metres: float = 0.0,
     union = _clean(unary_union([b.geometry for b in bands]))
     if union.is_empty:
         raise ValueError("aoi geometry is empty")
-    return AOI(union=union, bands=bands, buffered_m=buffer_metres)
+    return AOI(union=union, bands=bands, buffered_m=buffer_metres,
+               notes=list(dict.fromkeys(notes)))
 
 
 # ---------------------------------------------------------------------------

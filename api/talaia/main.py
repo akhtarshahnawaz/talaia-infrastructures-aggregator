@@ -80,10 +80,31 @@ async def _flush_usage_loop(store) -> None:
             log.warning("usage flush failed: %s", exc)
 
 
-async def _bootstrap(store) -> None:
-    """Load every resident-tier connector once, in-process."""
+async def _pending_sources(store) -> list:
+    """Resident connectors that hold no rows yet.
+
+    Checked per source rather than "is the store empty", because the bootstrap runs as a
+    background task: a redeploy part-way through leaves some sources loaded and the rest
+    at zero, and an emptiness check then decides everything is fine and never finishes
+    the job. That is how a deployment sits at three sources of twelve indefinitely.
+    """
     from .connectors.base import Tier
-    for cls in registry.by_tier(Tier.RESIDENT):
+
+    loaded: set[str] = set()
+    for table in ("assets", "networks", "pop_grid"):
+        try:
+            loaded |= {r[0] for r in
+                       await store.fetch(f"SELECT DISTINCT source_id FROM {table}")}
+        except Exception:  # pragma: no cover - table may not exist yet
+            pass
+    return [c for c in registry.by_tier(Tier.RESIDENT) if c.meta.id not in loaded]
+
+
+async def _bootstrap(store, connectors=None) -> None:
+    """Load resident-tier connectors in-process."""
+    from .connectors.base import Tier
+    for cls in (connectors if connectors is not None
+                else registry.by_tier(Tier.RESIDENT)):
         try:
             n = await cls().ingest(store)
             log.info("bootstrap: %s -> %s rows", cls.meta.id, f"{n:,}")
@@ -145,13 +166,16 @@ async def lifespan(app: FastAPI):
     stats = await store.stats()
     log.info("TALAIA ready - %s assets, %s networks, %s cached tiles",
              f"{stats['assets']:,}", f"{stats['networks']:,}", stats["cached_tiles"])
-    if stats["assets"] == 0 and settings.auto_bootstrap:
+    if settings.auto_bootstrap:
         # DuckDB is single-writer, so ingest has to happen inside the serving process:
         # a separate `python -m talaia ingest` would be locked out while the API holds
         # the file. Running it as a background task also means a cold deploy with an
-        # empty volume self-heals, serving OSM-only results until the load completes.
-        log.warning("store is empty - bootstrapping resident sources in the background")
-        app.state.bootstrap_task = asyncio.create_task(_bootstrap(store))
+        # empty volume self-heals, serving partial results until the load completes.
+        pending = await _pending_sources(store)
+        if pending:
+            log.warning("bootstrapping %d source(s) with no rows yet: %s",
+                        len(pending), ", ".join(c.meta.id for c in pending))
+            app.state.bootstrap_task = asyncio.create_task(_bootstrap(store, pending))
     if settings.warm_on_boot_list:
         await _warm_on_boot(store)
     flusher = asyncio.create_task(_flush_usage_loop(store))
@@ -202,10 +226,19 @@ async def timing_and_request_id(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def unhandled(request: Request, exc: Exception):  # pragma: no cover
-    log.exception("unhandled error on %s", request.url.path)
-    return JSONResponse(status_code=500,
-                        content={"error": "internal_error",
-                                 "detail": f"{type(exc).__name__}: {exc}"})
+    """Log the detail, return a reference.
+
+    Echoing the exception text told a caller which geometry library we use and what it
+    objected to, which is of no use to them and of some use to someone else.
+    """
+    rid = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:12]}"
+    log.exception("unhandled error on %s [%s]", request.url.path, rid)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "internal_error", "request_id": rid,
+                 "detail": "An unexpected error occurred. Quote the request_id if you "
+                           "report this."},
+        headers={"x-request-id": rid})
 
 
 @app.get("/health", tags=["metadata"])
@@ -213,7 +246,8 @@ async def health():
     try:
         stats = await get_store().stats()
         return {"status": "ok", "assets": stats["assets"],
-                "cached_tiles": stats["cached_tiles"]}
+                "cached_tiles": stats["cached_tiles"],
+                "failed_tiles": stats.get("failed_tiles", 0)}
     except Exception as exc:
         return JSONResponse(status_code=503,
                             content={"status": "degraded", "detail": str(exc)})
@@ -236,13 +270,21 @@ if settings.web_dist.exists():
     async def index():
         return FileResponse(settings.web_dist / "index.html")
 
+    # Paths the single-page app knows how to render. Anything else is a typo or a dead
+    # link, and answering 200 for it makes those indistinguishable from real pages to a
+    # crawler or an uptime check.
+    SPA_ROUTES = {"", "playground", "docs", "agents", "sources", "roadmap",
+                  "methodology", "signup", "verify"}
+
     @app.get("/{path:path}", include_in_schema=False)
     async def spa(path: str):
-        """Serve the SPA, letting client-side routing handle unknown paths."""
+        """Serve the SPA. Unknown paths still render it, but with a 404 status."""
         candidate = settings.web_dist / path
         if candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(settings.web_dist / "index.html")
+        known = path.strip("/").split("/")[0] in SPA_ROUTES
+        return FileResponse(settings.web_dist / "index.html",
+                            status_code=200 if known else 404)
 else:
     @app.get("/", include_in_schema=False)
     async def index_placeholder():

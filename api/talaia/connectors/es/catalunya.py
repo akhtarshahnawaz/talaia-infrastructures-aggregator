@@ -382,7 +382,12 @@ class CatFacilities(Connector):
             subcategory=self._subcategory(raw.get("categoria") or "", name or ""),
             name=name, lon=ll[0], lat=ll[1],
             address=_addr(raw, "via", street=clean_text(street)),
-            contacts={"website": clean_url(raw.get("web"))},
+            # The feed publishes telefon1, telefon2 and email. Mapping only `web` - a
+            # column this dataset does not even have - left 24,545 assets with an empty
+            # contacts block while the numbers sat in the response all along.
+            contacts={"phone": clean_phones(raw.get("telefon1"), raw.get("telefon2")),
+                      "email": clean_emails(raw.get("email")),
+                      "website": clean_url(raw.get("web"))},
             attributes={"categoria": clean_text(raw.get("categoria")),
                         "localitzacio": clean_text(raw.get("localitzacio")),
                         "codi_municipi": raw.get("codi_municipi")},

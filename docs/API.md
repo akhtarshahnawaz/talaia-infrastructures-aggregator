@@ -214,9 +214,22 @@ All the `POST /v1/*` data endpoints take the same object. Only `aoi` is required
 ```
 
 `timing` reports `total_ms`, `osm_fetch_ms`, `store_query_ms`, `conflation_ms`,
-`enrichment_ms`, `scoring_ms`, the tile counts (`tiles_total`, `tiles_fetched`,
-`tiles_cached`) and `core_impl` (`rust` or `python`). Useful for telling a slow network
-apart from a slow query.
+`scoring_ms`, the tile counts and `core_impl` (`rust` or `python`). Useful for telling a
+slow network apart from a slow query.
+
+The tile counts describe **this request**, while `/v1/stats` and `/v1/coverage` describe
+the whole store. Three states, and the distinction matters:
+
+| Field | Meaning |
+|---|---|
+| `tiles_cached` | Held locally and fresh. Real data. |
+| `tiles_fetched` | Retrieved from OpenStreetMap during this request |
+| `tiles_failed` | **Data is MISSING here.** The last fetch failed and the tile is inside its retry backoff. Always accompanied by a warning. |
+
+A non-zero `tiles_failed` means the OpenStreetMap layer — roads, power, rail, and
+OSM-sourced assets — is incomplete for part of the area *because we could not reach
+upstream*, not because the ground is empty. `enrichment_ms` is always 0; enrichment runs
+at ingest, not per query.
 
 ---
 
@@ -608,6 +621,9 @@ because a partial answer during an incident beats an error page.
 |---|---|---|
 | `OpenStreetMap fetch exceeded the …s budget` | Tiles were abandoned at the deadline | Coverage may be partial; retry shortly, the cache keeps what landed |
 | `…OpenStreetMap requests failed…` | Upstream errors | Registry data is unaffected; tiles retry after a backoff |
+| `N of M OpenStreetMap tile(s) … within their retry backoff` | **Data is missing, not absent.** A recent fetch failed and we are not retrying yet. | Treat roads and OSM assets as incomplete for that area; retry after the backoff. Never read a zero network length here as "no roads". |
+| `AOI ring was not closed…` | Your polygon was auto-closed per RFC 7946 | Harmless, but the shape measured is not byte-identical to the one you sent |
+| `AOI geometry was not OGC-valid…` | Self-intersection repaired before use | Check the geometry your model emitted |
 | `AOI covers N OSM tiles, above the …-tile limit` | Area too large for a live fetch | Results use resident sources only; warm the region or split the AOI |
 | `Conflation merged N duplicate record(s)…` | Normal operation | Informational — explains why the count is below the raw row count |
 | `Population grid truncated to the N densest cells…` | More than 5,000 cells | `total` is still complete; only the per-cell list is cut |
@@ -624,9 +640,9 @@ because a partial answer during an incident beats an error page.
 | `403` | Area above **your tier's** cap. The message names your area and your allowance. |
 | `404` | Geocoder found no match; or an admin route with no admin key configured |
 | `409` | An active key already exists for that email |
-| `422` | Malformed AOI, or area above the **service-wide** ceiling |
+| `422` | Malformed AOI (including an unsupported geometry `type`), or area above the **service-wide** ceiling |
 | `429` | Rate limit or daily quota exhausted — carries `Retry-After` |
-| `500` | Unhandled error, with a typed envelope |
+| `500` | Unhandled error. Returns a `request_id` to quote, not the internal exception. |
 
 ```jsonc
 { "detail": "Area of interest is 1,479.7 km², above the 250 km² limit for the 'free' tier. Split the request into smaller polygons, or request a higher tier." }

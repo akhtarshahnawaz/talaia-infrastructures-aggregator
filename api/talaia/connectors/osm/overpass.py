@@ -193,7 +193,8 @@ class OpenStreetMap(Connector):
         resident tier plus a warning, which is far more useful than a 502.
         """
         stats = {"tiles_total": 0, "tiles_fetched": 0, "tiles_cached": 0,
-                 "assets": 0, "networks": 0, "ms": 0.0, "warnings": []}
+                 "tiles_failed": 0, "assets": 0, "networks": 0, "ms": 0.0,
+                 "warnings": []}
         t_start = time.perf_counter()
         deg = settings.osm_tile_deg
         tiles = tiles_for_geometry(geometry, deg)
@@ -207,8 +208,23 @@ class OpenStreetMap(Connector):
             return stats
 
         by_key = dict(tiles)
-        stale = await store.stale_tiles(list(by_key))
-        stats["tiles_cached"] = len(tiles) - len(stale)
+        states = await store.tile_states(list(by_key))
+        stale = {k for k, v in states.items() if v == "stale"}
+        failed = {k for k, v in states.items() if v == "failed"}
+        # Only tiles we actually hold data for count as cached. A tile inside its retry
+        # backoff is NOT cached - there is nothing behind it - and reporting it as such
+        # turns "we could not reach OpenStreetMap" into "there is nothing here".
+        stats["tiles_cached"] = sum(1 for v in states.values() if v == "fresh")
+        stats["tiles_failed"] = len(failed)
+        if failed:
+            # Emitted on every response served while the backoff holds, not only on the
+            # request that first hit the failure. The backoff suppresses the network
+            # call; it must never suppress the warning.
+            stats["warnings"].append(
+                f"{len(failed)} of {len(tiles)} OpenStreetMap tile(s) in this area could "
+                f"not be fetched recently and are within their retry backoff, so roads, "
+                f"power lines and OSM-sourced assets are MISSING here rather than absent. "
+                f"Retry in up to {settings.osm_error_retry_minutes} minutes.")
         if not stale:
             stats["ms"] = (time.perf_counter() - t_start) * 1000
             return stats

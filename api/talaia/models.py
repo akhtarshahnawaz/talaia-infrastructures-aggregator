@@ -171,7 +171,12 @@ class ExposureRequest(BaseModel):
     include_geometry: bool = Field(True, description="Return per-asset geometry")
 
     live_osm: bool | None = Field(None, description="Override the live OSM fetch flag")
-    enrich: bool | None = None
+    enrich: bool | None = Field(
+        None,
+        description=("Reserved. Tier C enrichment - geocoding an address-only registry "
+                     "record - runs at ingest, not per query, so this flag changes "
+                     "nothing today and timing.enrichment_ms is always 0. Kept in the "
+                     "contract so the field does not have to be reintroduced later."))
     conflate: bool = True
     max_assets: int | None = Field(None, ge=1, le=50_000)
     sort_by: Literal["priority", "distance", "value", "category"] = "priority"
@@ -313,11 +318,18 @@ class Timing(BaseModel):
     osm_fetch_ms: float = 0.0
     store_query_ms: float = 0.0
     conflation_ms: float = 0.0
-    enrichment_ms: float = 0.0
+    enrichment_ms: float = Field(
+        0.0, description=("Always 0: enrichment happens at ingest, not per query. See "
+                          "the `enrich` request field."))
     scoring_ms: float = 0.0
     tiles_total: int = 0
     tiles_fetched: int = 0
-    tiles_cached: int = 0
+    tiles_cached: int = Field(
+        0, description="Tiles held locally and still fresh. Excludes failed tiles.")
+    tiles_failed: int = Field(
+        0, description=("Tiles whose last fetch failed and are inside their retry "
+                        "backoff. Data for these is MISSING, not absent - a warning "
+                        "accompanies any non-zero value."))
     core_impl: str = "python"
 
 

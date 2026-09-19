@@ -456,6 +456,45 @@ class Store:
                    else error_backoff_minutes)
         return await asyncio.to_thread(self._stale_tiles, tile_keys, ttl, backoff)
 
+    def _tile_states(self, tile_keys: list[str], ttl_hours: int,
+                     error_backoff_minutes: int) -> dict[str, str]:
+        """Classify each tile as ``fresh``, ``failed`` or ``stale``.
+
+        Three states, not two. "Not going to fetch this right now" covers both a tile we
+        already hold and a tile whose last fetch failed and is inside its retry backoff,
+        and collapsing those into one bucket is how a failure ends up reported as a cache
+        hit - with no data behind it and no warning to say so.
+        """
+        if not tile_keys:
+            return {}
+        now = _utcnow()
+        ttl_cutoff = now - timedelta(hours=int(ttl_hours))
+        error_cutoff = (now - timedelta(minutes=int(error_backoff_minutes))
+                        if error_backoff_minutes > 0 else None)
+        placeholders = ",".join("?" * len(tile_keys))
+        sql = f"""
+            SELECT tile_key, status, fetched_at FROM osm_tile_cache
+            WHERE tile_key IN ({placeholders})
+        """
+        states = {k: "stale" for k in tile_keys}
+        with self.cursor() as cur:
+            for key, status, fetched_at in cur.execute(sql, tile_keys).fetchall():
+                if fetched_at is None:
+                    continue
+                if status == "ok" and fetched_at > ttl_cutoff:
+                    states[key] = "fresh"
+                elif (status != "ok" and error_cutoff is not None
+                      and fetched_at > error_cutoff):
+                    states[key] = "failed"
+        return states
+
+    async def tile_states(self, tile_keys: list[str], ttl_hours: int | None = None,
+                          error_backoff_minutes: int | None = None) -> dict[str, str]:
+        ttl = settings.osm_tile_ttl_hours if ttl_hours is None else ttl_hours
+        backoff = (settings.osm_error_retry_minutes if error_backoff_minutes is None
+                   else error_backoff_minutes)
+        return await asyncio.to_thread(self._tile_states, tile_keys, ttl, backoff)
+
     def _mark_tiles(self, tiles: list[dict]) -> None:
         import pandas as pd
 
@@ -556,7 +595,15 @@ class Store:
             "assets": _one("SELECT count(*) FROM assets"),
             "networks": _one("SELECT count(*) FROM networks"),
             "population_cells": _one("SELECT count(*) FROM pop_grid"),
-            "cached_tiles": _one("SELECT count(*) FROM osm_tile_cache WHERE status='ok'"),
+            # Fresh successes only, matching /v1/coverage.fresh_tiles_total and
+            # timing.tiles_cached. Counting every status='ok' row regardless of age -
+            # and counting error rows nowhere - was how three endpoints reported three
+            # different numbers for the same cache.
+            "cached_tiles": _one(
+                "SELECT count(*) FROM osm_tile_cache WHERE status='ok' AND fetched_at > "
+                f"(TIMESTAMP '{(_utcnow() - timedelta(hours=settings.osm_tile_ttl_hours)).isoformat(sep=' ')}')"),
+            "failed_tiles": _one(
+                "SELECT count(*) FROM osm_tile_cache WHERE status <> 'ok'"),
             "enrichment_entries": _one("SELECT count(*) FROM enrichment_cache"),
             # Count population-grid sources too: they live in their own table, and a
             # landing page that says "6 sources" while /v1/sources lists 8 is a bug.

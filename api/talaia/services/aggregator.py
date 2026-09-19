@@ -59,6 +59,8 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
         raise ValueError(f"AOI area {aoi.area_km2:,.0f} km2 exceeds the "
                          f"{settings.max_aoi_km2:,.0f} km2 limit")
 
+    warnings.extend(aoi.notes)
+
     # -- 2. layers ---------------------------------------------------------
     categories = resolve_layers(req.layers)
 
@@ -72,6 +74,7 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
             timing.tiles_total = stats["tiles_total"]
             timing.tiles_fetched = stats["tiles_fetched"]
             timing.tiles_cached = stats["tiles_cached"]
+            timing.tiles_failed = stats.get("tiles_failed", 0)
             warnings.extend(stats["warnings"])
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("osm warm failed")
@@ -168,8 +171,13 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
         cap.setdefault("people", people or None)
         cap.setdefault("basis", basis)
         if is_default:
-            cap["confidence"] = 0.2
             default_people_total += people
+            # `is_default` describes the PEOPLE estimate, not the whole capacity record.
+            # A REGA holding publishes a real headcount and only its human occupancy is
+            # guessed; overwriting the source's own confidence here rated a registry
+            # figure exactly as trustworthy as a guess, and made the field carry no
+            # information at all. Only fill it in when the source gave us nothing.
+            cap.setdefault("confidence", 0.2)
         else:
             registry_people_total += people
 

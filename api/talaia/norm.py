@@ -307,12 +307,16 @@ def geocode_query(street: Any, municipality: Any, country: str = "Spain") -> str
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 
 
-def clean_phones(value: Any) -> list[str]:
-    """Extract Spanish phone numbers, tolerating ``;``/``/``/`` - `` separated lists."""
-    if value is None:
-        return []
+def clean_phones(*values: Any) -> list[str]:
+    """Extract Spanish phone numbers, tolerating ``;``/``/``/`` - `` separated lists.
+
+    Takes several values because registries commonly split one entry's numbers across
+    columns - telefon1 and telefon2 - and the caller should not have to merge and
+    de-duplicate them by hand.
+    """
     out: list[str] = []
-    for chunk in re.split(r"[;,/|]| y | i ", str(value)):
+    for chunk in re.split(r"[;,/|]| y | i ",
+                          " ; ".join(str(v) for v in values if v is not None)):
         digits = re.sub(r"[^\d+]", "", chunk)
         if digits.startswith("00"):
             digits = "+" + digits[2:]
