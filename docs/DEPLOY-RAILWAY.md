@@ -356,6 +356,7 @@ scale, implement the PostGIS backend behind the existing `Store` interface.
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| Build fails: `docker VOLUME at Line N is not supported, use Railway Volumes` | A `VOLUME` instruction in the Dockerfile | Delete it. Railway rejects `VOLUME`; persistence comes from the volume you mount in step 3 |
 | `Could not set lock on file` | Two processes on one volume | Run a single replica; stop the API before any CLI write |
 | `/v1/stats` shows `"core_impl": "python"` | Rust stage failed | Check the build log; it is a performance loss, not an outage |
 | Everything returns 401 | No key, or it was lost with the volume | Mint one with `TALAIA_ADMIN_KEY`, or redeploy for a new bootstrap key |

@@ -72,8 +72,11 @@ COPY api/ /app/api/
 COPY sql/ /app/sql/
 COPY --from=web-builder /web/dist /app/web/dist
 
+# Persistence comes from a Railway Volume mounted at /data (see docs/DEPLOY-RAILWAY.md
+# step 3). No Docker `VOLUME` instruction: Railway's builder rejects it, and the mount
+# would shadow it anyway. Without a volume attached this directory is ephemeral and the
+# store is rebuilt on every deploy.
 RUN mkdir -p /data
-VOLUME ["/data"]
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
