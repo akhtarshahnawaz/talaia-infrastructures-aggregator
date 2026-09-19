@@ -213,6 +213,8 @@ health check, background bootstrap on empty DB, `.env.example`.
    conflation source-priority table already contains their ids, and the connector
    contract is the same, so each is a self-contained addition — but today, outside
    Catalonia the service returns OpenStreetMap only, and says so via `coverage_regime`.
+   `connectors/es/spain.py` is the empty module that would hold them; its docstring
+   names the four datasets and what adding one involves.
 2. **No cadastral footprints.** Building areas come from OSM polygons where present
    (~61 % of OSM assets in the test AOI) and from class defaults otherwise, which caps
    valuation confidence at 0.35 for the remainder.

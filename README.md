@@ -207,6 +207,41 @@ public site. Set `TALAIA_PUBLIC_METADATA=false` to gate those too.
 
 ---
 
+## Population: a total, or a surface
+
+By default the report gives one resident figure for the AOI (plus one per band). Set
+`include_population_grid: true` and it also returns the individual **1 km census cells**,
+ranked by density, so you can map where people actually are rather than only how many
+are exposed:
+
+```jsonc
+"population": {
+  "total": 179733.0,
+  "cell_count": 31,
+  "peak_density_per_km2": 33551.0,
+  "cells": [
+    { "cell_id": "1kmN2067E3662", "lon": 2.1416, "lat": 41.4003,
+      "population": 33551.0,          // the whole cell
+      "population_in_aoi": 22285.0,   // the share inside your polygon
+      "overlap_fraction": 0.6642,
+      "density_per_km2": 33551.0,
+      "band": "0-1h" }                // earliest band covering the cell centroid
+  ]
+}
+```
+
+The per-cell `population_in_aoi` values sum to `total` exactly. Cell polygons are
+included when `include_geometry` is also set. The list is capped at the 5,000 densest
+cells, with a warning — `total` always counts every cell.
+
+Two cautions. `density_per_km2` is the **whole cell's** density, not the clipped part: a
+cell half inside your polygon is the same neighbourhood, half observed, so scaling it
+would invent a gradient at the AOI edge. And `band` on a cell is a centroid label for
+mapping — summing cells by it will not reproduce `by_band`, which is area-weighted and
+exclusive. Quote `by_band` for per-band population.
+
+---
+
 ## Use it from an agent (MCP)
 
 TALAIA is also a [Model Context Protocol](https://modelcontextprotocol.io) server, so an

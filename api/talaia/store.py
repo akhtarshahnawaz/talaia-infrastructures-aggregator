@@ -396,9 +396,11 @@ class Store:
     def _query_population(self, wkt: str) -> list[dict]:
         """Area-weighted census population: each cell contributes its overlap fraction."""
         sql = """
-            SELECT cell_id, population,
+            SELECT cell_id, population, area_m2,
                    ST_Area_Spheroid(ST_Intersection(geom, ST_GeomFromText(?)))
                      / NULLIF(ST_Area_Spheroid(geom), 0) AS frac,
+                   ST_X(ST_Centroid(geom)) AS lon,
+                   ST_Y(ST_Centroid(geom)) AS lat,
                    ST_AsGeoJSON(geom) AS geojson
             FROM pop_grid
             WHERE ST_Intersects(geom, ST_GeomFromText(?))

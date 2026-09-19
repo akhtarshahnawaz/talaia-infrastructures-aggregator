@@ -211,6 +211,7 @@ for a in r["assets"][:5]:
                   ["include_assets", "bool", "true", "Return the asset array."],
                   ["include_networks", "bool", "true", "Return roads/power/rail clipped to the AOI."],
                   ["include_population", "bool", "true", "Run the census population overlay."],
+                  ["include_population_grid", "bool", "false", "Also return the individual 1 km census cells, so population can be mapped as a surface rather than a single number."],
                   ["include_geometry", "bool", "true", "Return per-asset geometry."],
                   ["live_osm", "bool", "server", "Fetch missing OSM tiles. Set false for guaranteed-fast responses."],
                   ["conflate", "bool", "true", "Merge cross-source duplicates."],
@@ -285,6 +286,7 @@ evacuate_first = [a for a in report["assets"]
               <tbody className="text-slate-400">
                 {[["talaia_exposure_summary", "Aggregates for an area. Cheap enough to poll as a perimeter evolves."],
                   ["talaia_list_assets", "Individual assets ranked by triage score, with contacts and capacity."],
+                  ["talaia_population_grid", "Where the people are: 1 km census cells ranked by density."],
                   ["talaia_geocode", "A Spanish address to coordinates."],
                   ["talaia_taxonomy", "The category vocabulary, for the layers filter."],
                   ["talaia_my_limits", "This key's tier, caps and usage today."],
@@ -389,6 +391,44 @@ evacuate_first = [a for a in report["assets"]
             Always read <code>warnings</code>. A failed OpenStreetMap fetch, an AOI outside registry
             coverage or a truncated result set are reported there rather than as an error, because a
             partial answer during an incident beats an error page.
+          </Note>
+        </Section>
+
+        <Section kicker="Response" title="Population as a surface, not a number">
+          <p>
+            By default the report gives one resident figure for the area, plus one per
+            band. Set <code className="text-ember-300">include_population_grid</code> and it
+            also returns the individual 1&nbsp;km census cells, ranked by density — so you
+            can map where people actually are, not only how many are exposed.
+          </p>
+          <Code lang="json">{`"population": {
+  "total": 179733.0,
+  "cell_count": 31,
+  "peak_density_per_km2": 33551.0,
+  "cells": [
+    { "cell_id": "1kmN2067E3662", "lon": 2.1416, "lat": 41.4003,
+      "population": 33551.0,          // the whole cell
+      "population_in_aoi": 22285.0,   // the share inside your polygon
+      "overlap_fraction": 0.6642,
+      "density_per_km2": 33551.0,
+      "band": "0-1h" }
+  ]
+}`}</Code>
+          <p>
+            The per-cell <code className="text-ember-300">population_in_aoi</code> values sum
+            to <code className="text-ember-300">total</code> exactly. Cell polygons are
+            included when <code className="text-ember-300">include_geometry</code> is also
+            set. The list is capped at the 5,000 densest cells with a warning;{" "}
+            <code className="text-ember-300">total</code> always counts every cell.
+          </p>
+          <Note kind="warn">
+            <code>density_per_km2</code> is the <strong className="text-slate-200">whole
+            cell&rsquo;s</strong> density, not the clipped part — a cell half inside your
+            polygon is the same neighbourhood, half observed, and scaling it would invent a
+            gradient at the area&rsquo;s edge. And <code>band</code> on a cell is a centroid
+            label for colouring a map: summing cells by it will not reproduce{" "}
+            <code>by_band</code>, which is area-weighted and exclusive. Quote{" "}
+            <code>by_band</code> for per-band population.
           </Note>
         </Section>
 

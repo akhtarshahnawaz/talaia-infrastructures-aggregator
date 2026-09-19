@@ -132,7 +132,10 @@ async def _tool_exposure_summary(args: dict, key: ApiKey | None) -> dict:
         f"People at facilities (capacity, not live occupancy): {s.people_estimate:,.0f}"
         f" - {s.people_from_registry:,.0f} from registry figures,"
         f" {s.people_from_defaults:,.0f} inferred from class defaults.",
-        f"Resident population (census, area-weighted): {s.population_resident:,.0f}.",
+        f"Resident population (census, area-weighted): {s.population_resident:,.0f}"
+        + (f", peaking at {report.population.peak_density_per_km2:,.0f} people/km2 "
+           f"(talaia_population_grid shows where)."
+           if report.population.peak_density_per_km2 else "."),
         f"Replacement value at risk: {_eur(s.total_value_eur)}.",
         f"Critical: {s.critical_assets:,}   Hazardous: {s.hazardous_assets:,}   "
         f"Response assets: {s.response_assets:,}   "
@@ -251,6 +254,50 @@ async def _tool_list_assets(args: dict, key: ApiKey | None) -> dict:
                            "total_matched": report.summary.asset_count,
                            "truncated": report.summary.asset_count > len(rows),
                            "assets": rows}}
+
+
+async def _tool_population_grid(args: dict, key: ApiKey | None) -> dict:
+    from .routers.v1 import _enforce_key_limits
+    from .services.aggregator import build_report
+
+    raw_top = args.get("top")
+    top = 20 if raw_top is None else int(raw_top)
+    if top < 1:
+        raise ValueError("top must be at least 1.")
+    top = min(top, 100)
+
+    req = _request_from(args, include_assets=False)
+    req = req.model_copy(update={"include_population_grid": True,
+                                 "include_networks": False,
+                                 "include_geometry": False})
+    req = _enforce_key_limits(req, key)
+    report = await build_report(req, get_store())
+    pop = report.population
+    if not pop.cells:
+        return {"text": (f"No census grid covers this area ({pop.method}). "
+                         f"Resident population could not be mapped."),
+                "structured": pop.model_dump(), "is_error": False}
+
+    cells = pop.cells[:top]
+    lines = [
+        f"{pop.total:,.0f} residents across {pop.cell_count:,} census cells of "
+        f"~1 km2. Peak density {pop.peak_density_per_km2:,.0f} people/km2.",
+        "",
+        f"Densest {len(cells)} cell(s) - this is where evacuation load concentrates:",
+        f"  {'lon':>8} {'lat':>8} {'per km2':>9} {'in AOI':>9}  {'cover':>6}  band",
+    ]
+    for c in cells:
+        lines.append(
+            f"  {c.lon:>8.4f} {c.lat:>8.4f} {c.density_per_km2:>9,.0f} "
+            f"{c.population_in_aoi:>9,.0f}  {c.overlap_fraction:>5.0%}  "
+            f"{c.band or '-'}")
+    if pop.by_band:
+        lines.append("\nBy arrival band (exclusive - each band counts only the ground "
+                     "it adds):")
+        for band, value in pop.by_band.items():
+            lines.append(f"  {band:<14} {value:>10,.0f} residents")
+    lines.append("\n" + pop.note)
+    return {"text": "\n".join(lines), "structured": pop.model_dump()}
 
 
 async def _tool_geocode(args: dict, key: ApiKey | None) -> dict:
@@ -386,6 +433,23 @@ TOOLS: list[dict[str, Any]] = [
                                                 "Large; usually not wanted."},
         }},
         "handler": _tool_list_assets,
+    },
+    {
+        "name": "talaia_population_grid",
+        "title": "Where the people are inside an area",
+        "description":
+            "Resident population as a surface rather than a single number: the census "
+            "grid cells covering the area, each ~1 km2, ranked by density, with how much "
+            "of each cell falls inside the area and which arrival band reaches it. Use "
+            "this to decide where evacuation load concentrates, rather than only how "
+            "many people are exposed in total. Census residents at home - not tourists, "
+            "daytime workers, or anyone already evacuated.",
+        "inputSchema": {"type": "object", "properties": {
+            **_AOI_PROPERTIES,
+            "top": {"type": "integer", "default": 20, "maximum": 100,
+                    "description": "How many of the densest cells to list."},
+        }},
+        "handler": _tool_population_grid,
     },
     {
         "name": "talaia_geocode",

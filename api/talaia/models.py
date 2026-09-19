@@ -162,6 +162,12 @@ class ExposureRequest(BaseModel):
     include_assets: bool = True
     include_networks: bool = True
     include_population: bool = True
+    include_population_grid: bool = Field(
+        False,
+        description=("Return the individual census grid cells rather than only the AOI "
+                     "total, so population can be mapped as a surface instead of a "
+                     "single number. Cell polygons are included when include_geometry "
+                     "is also set."))
     include_geometry: bool = Field(True, description="Return per-asset geometry")
 
     live_osm: bool | None = Field(None, description="Override the live OSM fetch flag")
@@ -210,6 +216,34 @@ class CategorySummary(BaseModel):
     human_bearing: bool = False
 
 
+class PopulationCell(BaseModel):
+    """One census grid cell clipped to the AOI.
+
+    ``population`` is the cell's full published count; ``population_in_aoi`` is that
+    count scaled by how much of the cell the AOI actually covers. Density is computed
+    from the whole cell, because a cell only half inside the AOI is not half as dense -
+    it is the same neighbourhood, half observed.
+    """
+    cell_id: str
+    lon: float = Field(..., description="Cell centroid longitude")
+    lat: float = Field(..., description="Cell centroid latitude")
+    population: float = Field(..., description="Residents in the whole cell")
+    population_in_aoi: float = Field(..., description="Area-weighted share inside the AOI")
+    overlap_fraction: float = Field(..., ge=0, le=1)
+    density_per_km2: float = 0.0
+    area_km2: float = 1.0
+    band: str | None = Field(
+        None,
+        description=(
+            "Earliest band whose perimeter covers this cell's CENTROID - a label for "
+            "colouring a map, not an apportionment. A cell straddling a band edge gets "
+            "one label, and a cell overlapping the AOI whose centroid sits outside every "
+            "band gets none. Summing cells by this field will therefore not reproduce "
+            "'by_band', which is area-weighted and exclusive. Quote 'by_band' for "
+            "per-band population; use this for placement."))
+    geometry: GeoJSON | None = Field(None, description="Cell polygon; only when include_geometry")
+
+
 class PopulationResult(BaseModel):
     total: float = 0.0
     method: str = "ine_grid_area_weighted"
@@ -221,6 +255,12 @@ class PopulationResult(BaseModel):
         "are exclusive - each band counts only the ground it adds over earlier bands."
     )
     by_band: dict[str, float] = Field(default_factory=dict)
+    cells: list[PopulationCell] = Field(
+        default_factory=list,
+        description="Per-cell breakdown. Empty unless include_population_grid is set.")
+    cells_truncated: bool = False
+    peak_density_per_km2: float = Field(
+        0.0, description="Densest cell touching the AOI - where evacuation load concentrates")
 
 
 class NetworkClass(BaseModel):

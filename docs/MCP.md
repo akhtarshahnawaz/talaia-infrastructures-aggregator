@@ -65,6 +65,7 @@ The package must be importable — either installed, or with `api/` on `PYTHONPA
 |---|---|
 | `talaia_exposure_summary` | Aggregates: counts by category, people, population, value, livestock, per-band breakdown, top triage scores. No asset list. |
 | `talaia_list_assets` | Individual assets ranked by triage score, with contacts, capacity, valuation and provenance. |
+| `talaia_population_grid` | Where the people are: 1 km census cells ranked by density, with per-cell overlap and arrival band. |
 | `talaia_geocode` | A Spanish address to coordinates, via CartoCiudad. |
 | `talaia_taxonomy` | The category/subcategory vocabulary, for the `layers` filter. |
 | `talaia_my_limits` | This key's tier, caps and usage today. |
@@ -136,9 +137,11 @@ Note the last row: the unlimited tier removes the *tier* cap, not the service-wi
 
 1. `talaia_my_limits` once, to learn the maximum area per call.
 2. `talaia_exposure_summary` on each perimeter as the simulation steps — cheap, small,
-   safe to poll.
-3. `talaia_list_assets` with `layers` narrowed, only when something crosses a threshold.
-4. `talaia_geocode` to turn a reported address into a centre point.
+   safe to poll. It reports peak population density, which is the cue to look closer.
+3. `talaia_population_grid` when that peak matters — it says *where* the residents are,
+   not just how many, which is what an evacuation order actually needs.
+4. `talaia_list_assets` with `layers` narrowed, only when something crosses a threshold.
+5. `talaia_geocode` to turn a reported address into a centre point.
 
 Two things to carry into whatever the agent writes: capacity figures are **registered
 capacity, not live occupancy** — they exclude who has already evacuated — and valuations

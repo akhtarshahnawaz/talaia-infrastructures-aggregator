@@ -153,3 +153,84 @@ def test_distant_namesakes_are_not_merged():
 def test_conflation_is_a_noop_on_a_single_asset():
     out, stats = conflate([_asset("1", "osm", "X", 1.0, 41.0)])
     assert len(out) == 1 and out[0]["merged_count"] == 1 and out[0]["_provenance"]
+
+
+# ---------------------------------------------------------------------------
+# Population grid: the per-cell breakdown
+# ---------------------------------------------------------------------------
+from talaia.geo import Band  # noqa: E402
+from talaia.services.population import MAX_CELLS, _build_cells  # noqa: E402
+from shapely.geometry import box as _box  # noqa: E402
+
+
+def _row(cell_id, lon, lat, pop, frac=1.0, area_m2=1e6):
+    return {"cell_id": cell_id, "lon": lon, "lat": lat, "population": pop,
+            "frac": frac, "area_m2": area_m2,
+            "geojson": '{"type":"Polygon","coordinates":[[[0,0],[0,1],[1,1],[1,0],[0,0]]]}'}
+
+
+def test_a_partly_covered_cell_contributes_only_its_overlap():
+    cells, _, _ = _build_cells([_row("a", 2.0, 41.0, 1000, frac=0.25)], [],
+                               with_geometry=False)
+    assert cells[0].population == 1000
+    assert cells[0].population_in_aoi == 250
+
+
+def test_density_uses_the_whole_cell_not_the_clipped_part():
+    """A cell half inside the AOI is the same neighbourhood, half observed. Scaling its
+    density by the overlap would invent a gradient at the AOI edge."""
+    full, _, _ = _build_cells([_row("a", 2.0, 41.0, 1000, frac=1.0)], [],
+                              with_geometry=False)
+    half, _, _ = _build_cells([_row("a", 2.0, 41.0, 1000, frac=0.5)], [],
+                              with_geometry=False)
+    assert full[0].density_per_km2 == half[0].density_per_km2 == 1000
+
+
+def test_cells_come_back_densest_first():
+    rows = [_row("a", 2.0, 41.0, 100), _row("b", 2.1, 41.0, 900),
+            _row("c", 2.2, 41.0, 500)]
+    cells, _, peak = _build_cells(rows, [], with_geometry=False)
+    assert [c.cell_id for c in cells] == ["b", "c", "a"]
+    assert peak == 900
+
+
+def test_truncation_keeps_the_densest_cells():
+    rows = [_row(f"c{i}", 2.0 + i / 1000, 41.0, float(i))
+            for i in range(MAX_CELLS + 50)]
+    cells, truncated, _ = _build_cells(rows, [], with_geometry=False)
+    assert truncated is True
+    assert len(cells) == MAX_CELLS
+    assert cells[0].population == float(MAX_CELLS + 49), "densest survived the cut"
+
+
+def test_geometry_is_omitted_unless_asked_for():
+    without, _, _ = _build_cells([_row("a", 2.0, 41.0, 10)], [], with_geometry=False)
+    with_geom, _, _ = _build_cells([_row("a", 2.0, 41.0, 10)], [], with_geometry=True)
+    assert without[0].geometry is None
+    assert with_geom[0].geometry["type"] == "Polygon"
+
+
+def test_a_cell_is_labelled_with_the_earliest_band_reaching_it():
+    bands = [Band(label="0-1h", index=0, geometry=_box(1.9, 40.9, 2.1, 41.1), minutes=60),
+             Band(label="1-3h", index=1, geometry=_box(1.5, 40.5, 2.5, 41.5), minutes=180)]
+    rows = [_row("inner", 2.0, 41.0, 10), _row("outer", 2.3, 41.3, 10),
+            _row("beyond", 3.0, 42.0, 10)]
+    cells, _, _ = _build_cells(rows, bands, with_geometry=False)
+    got = {c.cell_id: c.band for c in cells}
+    assert got["inner"] == "0-1h", "earliest band wins, not the largest"
+    assert got["outer"] == "1-3h"
+    assert got["beyond"] is None, "a centroid outside every band gets no label"
+
+
+def test_an_unbanded_aoi_leaves_every_cell_unlabelled():
+    single = [Band(label="aoi", index=0, geometry=_box(1.9, 40.9, 2.1, 41.1))]
+    cells, _, _ = _build_cells([_row("a", 2.0, 41.0, 10)], single, with_geometry=False)
+    assert cells[0].band is None
+
+
+def test_rows_without_geometry_or_overlap_are_skipped():
+    rows = [_row("ok", 2.0, 41.0, 10),
+            {**_row("nofrac", 2.0, 41.0, 10), "frac": None},
+            {**_row("nolon", 2.0, 41.0, 10), "lon": None}]
+    cells, _, _ = _build_cells(rows, [], with_geometry=False)
+    assert [c.cell_id for c in cells] == ["ok"]

@@ -82,8 +82,11 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
     t = time.perf_counter()
     asset_task = store.query_assets(aoi.wkt, aoi.bbox, sorted(categories),
                                     limit=settings.max_assets_returned)
-    pop_task = (population_for(store, aoi, aoi.bands) if req.include_population
-                else asyncio.sleep(0, result=None))
+    pop_task = (population_for(store, aoi, aoi.bands,
+                               include_cells=req.include_population_grid,
+                               with_geometry=req.include_population_grid
+                               and req.include_geometry)
+                if req.include_population else asyncio.sleep(0, result=None))
     net_task = (store.query_networks(aoi.wkt, aoi.bbox)
                 if req.include_networks else asyncio.sleep(0, result=[]))
     (rows, strategy), population, net_rows = await asyncio.gather(
@@ -321,6 +324,12 @@ async def build_report(req: ExposureRequest, store) -> ExposureReport:
         warnings.append(
             f"Conflation merged {conflation_stats['merged']} duplicate record(s) across "
             f"sources into {conflation_stats['output']} distinct assets.")
+
+    if population is not None and population.cells_truncated:
+        warnings.append(
+            f"Population grid truncated to the {len(population.cells):,} densest cells of "
+            f"{population.cell_count:,}. 'total' still counts every cell; only the "
+            f"per-cell list is cut.")
 
     from ..connectors import registry
     sources = [c.meta for c in registry.all_connectors()
