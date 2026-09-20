@@ -7,6 +7,10 @@ dependencies = [
   "fastapi>=0.115", "uvicorn[standard]>=0.32", "httpx>=0.28", "duckdb>=1.1",
   "shapely>=2.0", "pydantic>=2.9", "pydantic-settings>=2.6", "numpy>=1.26",
   "orjson>=3.10", "rapidfuzz>=3.10", "openpyxl", "pandas",
+  # The national school registry exports legacy BIFF .xls, which openpyxl cannot read
+  # and only xlrd can. Undeclared, it is present on a development machine by accident
+  # and absent from the image, so the source fails in production and nowhere else.
+  "xlrd>=2.0",
 ]
 
 [build-system]

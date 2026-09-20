@@ -74,7 +74,8 @@ class CatSchools(Connector):
         # latest `curs` you get ~6x duplicate schools.
         self._curs = await latest_value(self.DATASET, "curs")
         log.info("schools: latest curs = %s", self._curs)
-        self._enrolments = await CatEnrolments.aggregate(self._curs)
+        self._enrolments = await CatEnrolments.aggregate(
+            self._curs, store=getattr(self, "_store", None))
         where = f"curs='{self._curs}'" if self._curs else None
         async for row in pages(self.DATASET, where=where, order="codi_centre"):
             yield row
@@ -176,8 +177,21 @@ class CatEnrolments(Connector):
     DATASET = "xvme-26kg"
 
     @classmethod
-    async def aggregate(cls, curs: str | None = None) -> dict[str, dict]:
+    async def aggregate(cls, curs: str | None = None, store=None) -> dict[str, dict]:
+        """Enrolment per centre for one academic year.
+
+        Cached by year, permanently. This is a 50,000-row Socrata aggregate that every
+        school ingest pulls in full, and it does not change once a year is published -
+        so re-fetching it on each run was pure repetition. A new `curs` is a new key, so
+        the next academic year fetches itself without anything to invalidate.
+        """
         curs = curs or await latest_value(cls.DATASET, "curs")
+        key = f"enrolments:{curs or 'latest'}"
+        if store is not None:
+            cached = await store.cache_get(key)
+            if cached:
+                log.info("enrolments: %s schools for curs %s (cached)", len(cached), curs)
+                return cached
         try:
             rows = await query(
                 cls.DATASET,
@@ -194,6 +208,17 @@ class CatEnrolments(Connector):
                 out[code] = {"students": to_float(r.get("students")),
                              "units": to_float(r.get("units"))}
         log.info("enrolments: aggregated %s schools for curs %s", len(out), curs)
+        if store is not None and out:
+            await store.cache_put(key, "enrolments", out)
+            # Record the run so the catalogue stops reporting "never run" for a source
+            # that has been working all along. It contributes capacity to es.cat.schools
+            # rather than assets of its own, so its row count is legitimately zero - but
+            # "never run" reads as broken, which it is not.
+            from datetime import datetime, timezone
+            await store.record_run(
+                cls.meta.id, "ok", len(out),
+                datetime.now(timezone.utc).replace(tzinfo=None),
+                None)
         return out
 
     async def fetch(self, **kwargs: Any) -> AsyncIterator[dict]:

@@ -562,7 +562,14 @@ class NationalSchools(Connector):
         then ask for the export - four requests for 35,000 rows, which is far gentler on
         the service than paginating HTML per province.
         """
-        import xlrd
+        try:
+            import xlrd
+        except ImportError as exc:  # pragma: no cover - a packaging failure, not a bug
+            raise RuntimeError(
+                "The school registry exports legacy BIFF .xls, which only xlrd reads. "
+                "Install it (pip install 'xlrd>=2.0') - it is declared in pyproject.toml "
+                "and the Dockerfile, so an image missing it was not built from them."
+            ) from exc
 
         client = get_client()
         await client.get(f"{RCD_BASE}/home.do", timeout=60.0)

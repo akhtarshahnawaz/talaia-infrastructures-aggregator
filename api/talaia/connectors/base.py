@@ -170,6 +170,10 @@ class Connector(ABC):
         from ..taxonomy import get_subcategory
 
         started = datetime.now(timezone.utc).replace(tzinfo=None)
+        # fetch() takes no arguments by design - a connector should not have to thread
+        # the store through its download logic - but an enrichment lookup made during
+        # the fetch does need somewhere to cache. Stash it rather than widen the API.
+        self._store = store
         total, skipped, geocoded, out_of_coverage, batch = 0, 0, 0, 0, []
         filtered = 0
         pending_geocode: list[RawAsset] = []
