@@ -202,12 +202,16 @@ async def test_the_shared_http_client_is_not_reused_across_event_loops():
     def in_another_loop():
         async def grab():          # must be called *inside* the new loop, not as an
             client = net.get_client()  # argument evaluated before asyncio.run starts it
-            # Close it here too: a client left open when its loop is torn down raises
-            # "Event loop is closed" later, from whichever test happens to be running.
-            await net.close_client()
+            await net.close_client()   # and closed inside it, for the same reason
             return id(client)
         return asyncio.run(grab())
 
     second_id = await asyncio.to_thread(in_another_loop)
     assert second_id != id(first), "a different loop must get its own client"
+
+    # `first` is still open and belongs to *this* loop. The nested run replaced the
+    # module global and then cleared it, so close_client() can no longer see it - and an
+    # httpx client still open when its loop is torn down raises "Event loop is closed"
+    # during finalisation, inside whichever unlucky test is running at the time.
+    await first.aclose()
     await net.close_client()
