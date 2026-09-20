@@ -269,6 +269,44 @@ class TestParity:
         rows, _ = await either.query_assets(AOI, BBOX)
         assert rows == [] and await either.query_networks(AOI, BBOX) == []
 
+    async def test_a_batch_containing_the_same_id_twice_is_accepted(self, either):
+        """Registries really do this - a facility listed once per service it offers, a
+        care home under two administrative records - and both collapse to one asset_id.
+
+        DuckDB's INSERT OR REPLACE silently keeps the first. Postgres refuses the whole
+        statement with "ON CONFLICT DO UPDATE command cannot affect row a second time",
+        so two sources died on the first deploy. Both engines must now accept it, and
+        agree on which row survives - which is why this asserts the surviving name
+        rather than just a row count.
+        """
+        await either.upsert_assets([
+            asset("dup", 2.17, 41.39, name="first"),
+            asset("other", 2.18, 41.39),
+            asset("dup", 2.17, 41.39, name="second"),
+        ])
+        rows, _ = await either.query_assets(AOI, BBOX)
+        assert {r["name"] for r in rows} == {"first", "other"}
+
+    async def test_duplicate_ids_across_separate_batches_still_update(self, either):
+        """The within-batch fix must not break the ordinary case it sits next to."""
+        await either.upsert_assets([asset("x", 2.17, 41.39, name="first")])
+        await either.upsert_assets([asset("x", 2.17, 41.39, name="second")])
+        rows, _ = await either.query_assets(AOI, BBOX)
+        assert [r["name"] for r in rows] == ["second"]
+
+    async def test_duplicate_population_cells_in_one_batch(self, either):
+        """pop_grid is keyed by cell_id and loaded in 5,000-row batches from a national
+        grid, so the same collision is possible there."""
+        cell = {"wkt": "POLYGON((2.1 41.3,2.2 41.3,2.2 41.4,2.1 41.4,2.1 41.3))",
+                "area_m2": 1e6, "source_id": "ine", "year": 2024}
+        await either.upsert_popgrid([
+            {"cell_id": "c1", "population": 100.0, **cell},
+            {"cell_id": "c1", "population": 999.0, **cell},
+        ])
+        cells = await either.query_population(
+            "POLYGON((2.1 41.3,2.15 41.3,2.15 41.35,2.1 41.35,2.1 41.3))")
+        assert len(cells) == 1 and cells[0]["population"] == 100.0
+
     async def test_empty_input_is_not_an_error(self, either):
         assert await either.upsert_assets([]) == 0
         assert await either.upsert_networks([]) == 0
@@ -319,6 +357,23 @@ class TestPostgresSpecific:
         # the other starts would mean they serialised.
         assert order != ["A", "A", "A", "B", "B", "B"]
         assert (await pg.fetch("SELECT count(*) FROM assets"))[0][0] == 12000
+
+    async def test_the_row_count_reports_what_was_stored(self, pg):
+        """Three rows in, two distinct ids, so two rows landed - and the ingest log and
+        /v1/sources should say two.
+
+        This is one place the backends deliberately disagree. DuckDB returns the number
+        of rows it was handed, so a source with duplicates has always over-reported
+        itself there; it drops the extras silently and still claims the higher figure.
+        Postgres has to identify the duplicates anyway in order to insert at all, so
+        there is no reason for it to repeat that.
+        """
+        n = await pg.upsert_assets([
+            asset("dup", 2.17, 41.39, name="first"),
+            asset("other", 2.18, 41.39),
+            asset("dup", 2.17, 41.39, name="second"),
+        ])
+        assert n == 2
 
     async def test_write_health_reports_no_single_writer(self, pg):
         health = pg.write_health()

@@ -410,6 +410,7 @@ class PostgresStore:
         if not values:
             return 0
         pk = PRIMARY_KEYS[table]
+        values = self._dedupe(table, columns, values)
         updates = [f"{c} = EXCLUDED.{c}" for c in target_cols if c.lower() not in pk]
         action = f"DO UPDATE SET {', '.join(updates)}" if updates else "DO NOTHING"
         pool = await self._opened()
@@ -426,6 +427,40 @@ class PostgresStore:
                     f"SELECT {', '.join(select_parts)} FROM _incoming {where} "
                     f"ON CONFLICT ({', '.join(pk)}) {action}")
         return len(values)
+
+    @staticmethod
+    def _dedupe(table: str, columns: list[str], values: list[tuple]) -> list[tuple]:
+        """Drop rows that collide on the primary key, keeping the first of each.
+
+        Postgres refuses an ON CONFLICT DO UPDATE whose own input contains the same key
+        twice - "cannot affect row a second time" - because it would have to decide
+        which of them wins and it will not guess. DuckDB's INSERT OR REPLACE did guess,
+        silently, and measurement says it keeps the **first**. So this keeps the first
+        too.
+
+        That choice is about parity, not merit. Every row already in the store was
+        settled by DuckDB's rule, and a backend swap is the wrong moment to also change
+        which of two colliding records survives - that would rewrite existing rows for
+        reasons nobody could see in a diff.
+
+        Real registries do produce these. Two sources hit it immediately on the first
+        Postgres deploy - a Catalan facility listed once per service it offers, and a
+        care home appearing under two administrative records - both collapsing to one
+        asset_id. The duplicates were always there; DuckDB just never said so, which is
+        the less useful behaviour of the two even though it is the one being preserved
+        here. A source where the choice actually matters should deduplicate in its
+        normalise(), where it knows what the rows mean. This is a backstop.
+        """
+        index = [columns.index(c) for c in PRIMARY_KEYS[table] if c in columns]
+        if not index:
+            return values
+        seen: dict[tuple, tuple] = {}
+        for row in values:
+            seen.setdefault(tuple(row[i] for i in index), row)
+        if len(seen) != len(values):
+            log.info("%s: %d row(s) in this batch collided on %s; kept the first of each",
+                     table, len(values) - len(seen), "+".join(PRIMARY_KEYS[table]))
+        return list(seen.values())
 
     def _prepare(self, columns: list[str], rows: list[dict]) -> tuple[list[str], list[tuple]]:
         columns = list(columns)
