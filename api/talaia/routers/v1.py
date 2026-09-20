@@ -310,12 +310,15 @@ async def coverage() -> dict[str, Any]:
     milliseconds, while a cold one pays an Overpass round-trip on the first request.
     """
     store = get_store()
-    # INTERVAL takes a literal, not a bind parameter. The value is an int from
-    # configuration, never from the request, so interpolating it is safe here.
+    # The cutoff is computed here and bound, rather than written as SQL. Two reasons,
+    # both of which have bitten: `INTERVAL n HOUR` is DuckDB's spelling and a syntax
+    # error in Postgres, and `current_timestamp` is the session's clock while
+    # fetched_at holds naive UTC - so on a server set to anything but UTC the
+    # comparison is silently off by the offset.
+    cutoff = _utcnow() - timedelta(hours=int(settings.osm_tile_ttl_hours))
     rows = await store.fetch(
         "SELECT tile_key, min_lon, min_lat, feature_count FROM osm_tile_cache "
-        "WHERE status = 'ok' AND fetched_at > "
-        f"(current_timestamp - INTERVAL {int(settings.osm_tile_ttl_hours)} HOUR)")
+        "WHERE status = 'ok' AND fetched_at > ?", [cutoff])
     fresh = {r[0]: (r[1], r[2], r[3] or 0) for r in rows}
     deg = settings.osm_tile_deg
     out = []
@@ -399,8 +402,8 @@ async def _issue_key(store, *, email: str, organisation: str | None, ip: str | N
             [record.key_hash])
     await store.execute_write(
         "INSERT INTO signups (id, email, organisation, ip, created_at, key_prefix) "
-        "VALUES (?, ?, ?, ?, current_timestamp, ?)",
-        [uuid.uuid4().hex, email, organisation, ip, record.prefix])
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [uuid.uuid4().hex, email, organisation, ip, _utcnow(), record.prefix])
     log.info("key issued: %s tier=%s verified=%s", record.prefix, record.tier, verified)
 
     spec = get_tier(record.tier)
@@ -419,6 +422,17 @@ async def _issue_key(store, *, email: str, organisation: str | None, ip: str | N
         },
         "warning": "Store this key now. It is hashed on arrival and cannot be shown again.",
     }
+
+
+def _utcnow() -> datetime:
+    """Naive UTC, matching every timestamp column in the schema.
+
+    Every `created_at`, `fetched_at` and `expires_at` is `TIMESTAMP` holding UTC with no
+    zone, so anything compared against them has to be the same thing. Asking the database
+    for `current_timestamp` instead returns the session's clock, which is only UTC by
+    luck of how the server happens to be configured.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 async def _signup_guards(store, email: str, ip: str) -> None:
@@ -442,8 +456,8 @@ async def _signup_guards(store, email: str, ip: str) -> None:
                     f"operator to revoke it if you need a new one."))
 
     recent = await store.fetch(
-        "SELECT count(*) FROM signups WHERE ip = ? AND created_at > "
-        "(current_timestamp - INTERVAL 24 HOUR)", [ip])
+        "SELECT count(*) FROM signups WHERE ip = ? AND created_at > ?",
+        [ip, _utcnow() - timedelta(hours=24)])
     if recent and recent[0][0] >= settings.signups_per_ip_per_day:
         raise HTTPException(
             status_code=429,

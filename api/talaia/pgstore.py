@@ -175,7 +175,14 @@ class PostgresStore:
             timeout=settings.pg_pool_timeout_s,
             max_lifetime=settings.pg_pool_max_lifetime_s,
             kwargs={"application_name": "talaia",
-                    "options": f"-c statement_timeout={int(settings.pg_statement_timeout_s * 1000)}"},
+                    # timezone=UTC is not cosmetic: every timestamp column here is
+                    # `timestamp without time zone` holding UTC, and the sync connection
+                    # already sets it. A pool that disagreed would write local time into
+                    # the same columns, which shows up as a retry backoff that never
+                    # matches rather than as an error.
+                    "options": (f"-c statement_timeout="
+                                f"{int(settings.pg_statement_timeout_s * 1000)} "
+                                f"-c timezone=UTC")},
             open=False,
         )
         log.info("postgres store ready (pool %d-%d)",

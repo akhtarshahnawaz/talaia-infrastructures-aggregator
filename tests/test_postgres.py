@@ -109,6 +109,69 @@ class TestTranslate:
         assert _translate("SELECT count(*) FROM assets") == "SELECT count(*) FROM assets"
 
 
+class TestNoDialectLeaksIntoSharedCode:
+    """SQL outside the two backend modules has to run on either engine.
+
+    Twice now a DuckDB-only construct has reached production in shared code and failed
+    only once it was on Postgres: `INSERT OR REPLACE` (caught by the translator) and
+    `INTERVAL 24 HOUR` in the signup throttle, which 500ed every signup. Both were
+    invisible locally because local development ran the engine they were written for.
+
+    Scanned from the AST rather than with grep, so a comment that merely mentions one of
+    these - and several do, explaining exactly this - is not a finding.
+    """
+
+    SHARED = "every module except the two backends, which are allowed their own dialect"
+    EXEMPT = {"store.py", "pgstore.py"}
+
+    # (pattern, why it does not belong in shared code)
+    BANNED = [
+        (r"\bINTERVAL\s+\d", "DuckDB spells intervals `INTERVAL 24 HOUR`; Postgres needs "
+                            "`INTERVAL '24 hours'`. Compute the cutoff in Python and "
+                            "bind it - that works on both and uses the right clock."),
+        (r"\bcurrent_timestamp\b", "this is the database session's clock, but every "
+                                  "timestamp column holds naive UTC written by the app. "
+                                  "Use a Python-computed UTC value and bind it."),
+        (r"\barg_max\s*\(", "DuckDB-only; Postgres wants DISTINCT ON."),
+        (r"\bquantile_cont\s*\(", "DuckDB-only; Postgres spells it percentile_cont."),
+    ]
+
+    def test_shared_modules_use_no_engine_specific_sql(self):
+        import ast
+        import pathlib
+        import re
+
+        pkg = pathlib.Path(__file__).resolve().parents[1] / "api" / "talaia"
+        findings: list[str] = []
+        for path in sorted(pkg.rglob("*.py")):
+            if path.name in self.EXEMPT:
+                continue
+            tree = ast.parse(path.read_text(), filename=str(path))
+            # Docstrings are string constants too, and several of them discuss these
+            # very constructs in order to explain why the code avoids them. Skip them,
+            # or the guard fires on its own documentation.
+            docstrings = set()
+            for holder in ast.walk(tree):
+                if isinstance(holder, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                       ast.AsyncFunctionDef)):
+                    body = getattr(holder, "body", None)
+                    if (body and isinstance(body[0], ast.Expr)
+                            and isinstance(body[0].value, ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        docstrings.add(id(body[0].value))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                    continue
+                if id(node) in docstrings:
+                    continue
+                for pattern, why in self.BANNED:
+                    if re.search(pattern, node.value, re.IGNORECASE):
+                        findings.append(
+                            f"{path.relative_to(pkg.parent.parent)}:{node.lineno} "
+                            f"matched /{pattern}/ - {why}")
+        assert not findings, "engine-specific SQL in shared code:\n  " + "\n  ".join(findings)
+
+
 # ---------------------------------------------------------------------------
 # Live Postgres
 # ---------------------------------------------------------------------------
@@ -652,3 +715,92 @@ class TestMigration:
         rows, _ = await pg.query_assets(AOI, BBOX)
         assert len(rows) == 1
         assert (await pg.fetch("SELECT count(*) FROM api_keys"))[0][0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Self-service signup, end to end, on Postgres
+# ---------------------------------------------------------------------------
+@needs_pg
+class TestSignupEndToEnd:
+    """Signup returned 500 on the first Postgres deploy.
+
+    The per-IP throttle asked for `created_at > (current_timestamp - INTERVAL 24 HOUR)`,
+    which is DuckDB's spelling of an interval and a syntax error in Postgres. It was
+    never covered because the existing signup tests drive the registry directly rather
+    than the route, so nothing executed that particular string against a database.
+    """
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        for name, value in {
+            "TALAIA_DATABASE_URL": DSN, "TALAIA_ADMIN_KEY": "admin-secret",
+            "TALAIA_REQUIRE_AUTH": "true", "TALAIA_AUTO_BOOTSTRAP": "false",
+            "TALAIA_ALLOW_SIGNUP": "true", "TALAIA_REQUIRE_EMAIL_VERIFICATION": "false",
+            "TALAIA_ENABLE_LIVE_OSM": "false", "TALAIA_API_KEYS": "",
+            "TALAIA_WARM_ON_BOOT": "", "TALAIA_SIGNUPS_PER_IP_PER_DAY": "2",
+        }.items():
+            monkeypatch.setenv(name, value)
+
+        import importlib
+
+        import talaia.config as config
+        config.get_settings.cache_clear()
+        fresh = config.Settings()
+        monkeypatch.setattr(config, "settings", fresh)
+        for module in ("talaia.main", "talaia.store", "talaia.pgstore", "talaia.auth",
+                       "talaia.routers.v1", "talaia.diagnostics", "talaia.mailer"):
+            mod = importlib.import_module(module)
+            if hasattr(mod, "settings"):
+                monkeypatch.setattr(mod, "settings", fresh)
+
+        import psycopg
+        with psycopg.connect(DSN, autocommit=True) as con:
+            con.execute("DELETE FROM api_keys")
+            con.execute("DELETE FROM signups")
+            con.execute("DELETE FROM pending_signups")
+
+        from talaia.main import app
+        with TestClient(app) as c:
+            yield c
+
+    def test_signup_issues_a_key(self, client):
+        r = client.post("/v1/signup", json={"email": "a@example.com",
+                                            "organisation": "Org"})
+        assert r.status_code in (200, 202), r.text
+        assert r.json().get("api_key", "").startswith("talaia_sk_")
+
+    def test_the_per_ip_throttle_actually_counts(self, client):
+        """The query that broke. It has to run *and* return the right number - a version
+        that merely parsed but compared against the wrong clock would let the cap through
+        silently."""
+        for i in range(2):
+            r = client.post("/v1/signup", json={"email": f"t{i}@example.com"})
+            assert r.status_code in (200, 202), r.text
+        blocked = client.post("/v1/signup", json={"email": "t2@example.com"})
+        assert blocked.status_code == 429, blocked.text
+        assert "24 hours" in blocked.json()["detail"]
+
+    def test_one_active_key_per_address(self, client):
+        assert client.post("/v1/signup",
+                           json={"email": "dup@example.com"}).status_code in (200, 202)
+        again = client.post("/v1/signup", json={"email": "dup@example.com"})
+        assert again.status_code == 409
+
+    def test_a_signup_row_is_recorded_with_a_usable_timestamp(self, client):
+        """created_at is written by the app as naive UTC. If the database wrote its own
+        clock instead, the throttle above would compare against the wrong instant."""
+        assert client.post("/v1/signup",
+                           json={"email": "ts@example.com"}).status_code in (200, 202)
+        import psycopg
+        with psycopg.connect(DSN, autocommit=True) as con:
+            (created,), = con.execute(
+                "SELECT created_at FROM signups WHERE email = 'ts@example.com'").fetchall()
+        assert abs((created - _utcnow()).total_seconds()) < 120
+
+    def test_regions_endpoint_runs_its_freshness_query(self, client):
+        """/v1/regions carried the same INTERVAL spelling, so it would have 500ed too."""
+        r = client.get("/v1/regions")
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), (list, dict))
