@@ -14,8 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -51,12 +52,63 @@ def _j(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+class StoreBusy(RuntimeError):
+    """A write could not get through in reasonable time.
+
+    DuckDB takes one writer, so every write queues behind ``_write_lock``. If a holder
+    stops making progress - a stalled ingest, a volume that has stopped acknowledging
+    writes - then without a deadline every later write waits forever. The request never
+    answers, the button appears to do nothing, and the log says nothing either, because
+    nothing has failed yet. Failing loudly after a bounded wait is worth far more than
+    waiting correctly for eternity.
+    """
+
+
 class Store:
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else settings.db_path
         self._con: duckdb.DuckDBPyConnection | None = None
         self._write_lock = asyncio.Lock()
         self._density_cache: float | None = None
+        # Write health, for the admin panel and the logs.
+        self._write_holder: str | None = None
+        self._write_since: float | None = None
+        self._last_write_ok: datetime | None = None
+        self._writes_blocked: int = 0
+
+    @asynccontextmanager
+    async def _writing(self, what: str):
+        """Hold the single-writer lock, with a deadline and a record of who has it."""
+        try:
+            await asyncio.wait_for(self._write_lock.acquire(),
+                                   timeout=settings.write_lock_timeout_s)
+        except asyncio.TimeoutError:
+            self._writes_blocked += 1
+            held_for = (time.monotonic() - self._write_since) if self._write_since else 0
+            log.error("write %r blocked: %r has held the writer for %.0fs",
+                      what, self._write_holder, held_for)
+            raise StoreBusy(
+                f"The database is not accepting writes: {self._write_holder!r} has held "
+                f"the single writer for {held_for:.0f}s. Nothing was changed."
+            ) from None
+        self._write_holder, self._write_since = what, time.monotonic()
+        try:
+            yield
+            self._last_write_ok = _utcnow()
+        finally:
+            self._write_holder, self._write_since = None, None
+            self._write_lock.release()
+
+    def write_health(self) -> dict[str, Any]:
+        return {
+            "blocked": self._write_since is not None
+            and (time.monotonic() - self._write_since) > settings.write_lock_timeout_s,
+            "holder": self._write_holder,
+            "held_for_s": round(time.monotonic() - self._write_since, 1)
+            if self._write_since else 0.0,
+            "last_write_ok": self._last_write_ok.isoformat() if self._last_write_ok else None,
+            "writes_refused": self._writes_blocked,
+        }
 
     # -- lifecycle ---------------------------------------------------------
     def connect(self) -> None:
@@ -193,13 +245,13 @@ class Store:
         return len(df)
 
     async def upsert_assets(self, rows: list[dict]) -> int:
-        async with self._write_lock:
+        async with self._writing("upsert_assets"):
             n = await asyncio.to_thread(self._bulk_upsert, "assets", ASSET_COLUMNS, rows)
         self.invalidate_density()
         return n
 
     async def upsert_networks(self, rows: list[dict]) -> int:
-        async with self._write_lock:
+        async with self._writing("upsert_networks"):
             return await asyncio.to_thread(self._bulk_upsert, "networks", NETWORK_COLUMNS, rows)
 
     def _upsert_popgrid(self, rows: list[dict]) -> int:
@@ -220,11 +272,11 @@ class Store:
         return len(df)
 
     async def upsert_popgrid(self, rows: list[dict]) -> int:
-        async with self._write_lock:
+        async with self._writing("upsert_popgrid"):
             return await asyncio.to_thread(self._upsert_popgrid, rows)
 
     async def delete_source(self, source_id: str) -> None:
-        async with self._write_lock:
+        async with self._writing("record_run"):
             await asyncio.to_thread(
                 self._fetch, "DELETE FROM assets WHERE source_id = ?", [source_id]
             )
@@ -235,7 +287,7 @@ class Store:
         DuckDB allows one writer; bulk paths already serialise through ``_write_lock``
         and small administrative writes must do the same or they can interleave.
         """
-        async with self._write_lock:
+        async with self._writing("execute_write"):
             await asyncio.to_thread(self._fetch, sql, params)
 
     # -- spatial reads -----------------------------------------------------
@@ -513,7 +565,7 @@ class Store:
     async def mark_tiles(self, tiles: list[dict]) -> None:
         if not tiles:
             return
-        async with self._write_lock:
+        async with self._writing("mark_tiles"):
             await asyncio.to_thread(self._mark_tiles, tiles)
 
     async def clear_tile_assets(self, tile_keys: list[str]) -> None:
@@ -521,7 +573,7 @@ class Store:
         if not tile_keys:
             return
         placeholders = ",".join("?" * len(tile_keys))
-        async with self._write_lock:
+        async with self._writing("replace_tile_rows"):
             await asyncio.to_thread(
                 self._fetch,
                 f"DELETE FROM assets WHERE tile_key IN ({placeholders})", tile_keys)
@@ -540,7 +592,7 @@ class Store:
             return None
 
     async def cache_put(self, key: str, kind: str, payload: dict) -> None:
-        async with self._write_lock:
+        async with self._writing("cache_put"):
             await asyncio.to_thread(
                 self._fetch,
                 "INSERT OR REPLACE INTO enrichment_cache (key, kind, payload, created_at) "
@@ -551,7 +603,7 @@ class Store:
     # -- ingest audit ------------------------------------------------------
     async def record_run(self, source_id: str, status: str, rows: int,
                          started_at: datetime, error: str | None = None) -> None:
-        async with self._write_lock:
+        async with self._writing("record_usage"):
             await asyncio.to_thread(
                 self._fetch,
                 "INSERT OR REPLACE INTO source_runs "

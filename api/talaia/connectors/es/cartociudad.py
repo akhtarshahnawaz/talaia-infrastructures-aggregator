@@ -23,7 +23,7 @@ from ...norm import clean_text, valid_lonlat
 
 log = logging.getLogger("talaia.cartociudad")
 
-_limiter = RateLimiter(0.05)
+_limiter = RateLimiter(settings.geocode_min_interval_s)
 _JSONP = re.compile(r"^[\w.]+\((.*)\)\s*;?\s*$", re.S)
 
 # CartoCiudad `type` values, best to worst. A portal is a street number; a municipio is
@@ -133,7 +133,7 @@ async def geocode(query: str, store=None) -> dict | None:
     return result
 
 
-async def geocode_many(queries: list[str], store=None, concurrency: int = 8
+async def geocode_many(queries: list[str], store=None, concurrency: int | None = None
                        ) -> list[dict | None]:
     """Geocode a batch with bounded concurrency, resolving each address only once.
 
@@ -144,7 +144,7 @@ async def geocode_many(queries: list[str], store=None, concurrency: int = 8
     school load: 66,748 requests for 51,216 distinct addresses, a third of the traffic
     spent re-asking questions already in flight.
     """
-    sem = asyncio.Semaphore(concurrency)
+    sem = asyncio.Semaphore(concurrency or settings.geocode_concurrency)
     unique = list(dict.fromkeys(q for q in queries if q))
 
     async def one(q: str):

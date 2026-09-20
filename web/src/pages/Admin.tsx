@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Code, Note, Pill } from "../components/ui";
 import {
   AdminAuthError, adminClearPending, adminCreateKey, adminEmailStatus, adminEmailTest,
-  adminDeleteKey, adminListKeys, adminPrefetchStart, adminPrefetchStatus,
+  adminDeleteKey, adminListKeys, adminPlaces, adminPrefetchStart,
+  adminPrefetchStatus,
   adminPrefetchStop, adminRevokeByEmail, adminRevokeKey, adminSignups,
   adminUpdateKey,
   adminUsage, adminWarmStart, adminWarmStatus, adminWarmStop, getAdminKey, getCoverage,
@@ -648,6 +649,13 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
   const [place, setPlace] = useState("");
   const [limit, setLimit] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [places, setPlaces] = useState<string[]>([]);
+
+  useEffect(() => {
+    adminPlaces()
+      .then((p) => setPlaces([...(p.provinces ?? []), ...(p.municipalities ?? [])]))
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     try { setData(await adminPrefetchStatus()); setError(null); }
@@ -698,17 +706,33 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
         <p className="mt-1 text-xs leading-relaxed text-slate-500">
           Leave both boxes empty for the full source. Naming a place is what makes a big
           registry quick — it is matched against the municipality and province the
-          publisher writes, before anything is geocoded.
+          publisher writes, before anything is geocoded — start typing and it will
+          suggest the 52 provinces, plus every municipality already in the store, spelled
+          exactly as the data spells them.
         </p>
         <div className="mt-3 grid gap-2 sm:grid-cols-[2fr_1fr_auto]">
-          <input className={input} placeholder="Place, e.g. Girona (optional)"
+          <input className={input} list="talaia-places" autoComplete="off"
+            placeholder="Place, e.g. Girona (optional)"
             value={place} onChange={(e) => setPlace(e.target.value)} />
+          <datalist id="talaia-places">
+            {places.map((p) => <option key={p} value={p} />)}
+          </datalist>
           <input className={input} placeholder="Max records (optional)" inputMode="numeric"
             value={limit} onChange={(e) => setLimit(e.target.value)} />
           <button className={btn} disabled={!!busy || data?.running}
             onClick={() => start()}>Load all</button>
         </div>
       </Card>
+
+      {data?.write_health?.blocked && (
+        <Note kind="warn">
+          <strong>The database is not accepting writes.</strong>{" "}
+          <code>{data.write_health.holder}</code> has held the single writer for{" "}
+          {Math.round(data.write_health.held_for_s)}s, so loading a dataset, warming the
+          cache and revoking a key will all be refused until it lets go. Restarting the
+          service clears it.
+        </Note>
+      )}
 
       {data?.boot_bootstrap && data.boot_bootstrap.state === "failed" && (
         <Note kind="warn">

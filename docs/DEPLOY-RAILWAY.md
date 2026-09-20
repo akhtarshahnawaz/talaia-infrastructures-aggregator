@@ -255,9 +255,39 @@ records considered and works on any source.
 A filtered load is recorded as `partial`, never `ok`, so the next boot still loads the
 source in full.
 
-That response also reports `boot_bootstrap`, which is what became of the background load
-started at boot. It runs detached, so if it dies its traceback goes to the log and
-nothing else notices — `{"state": "failed", "error": "..."}` is how you find out.
+### Why a full load takes an hour
+
+The download is already bulk: one file per registry. The time goes on turning addresses
+into coordinates, because CartoCiudad resolves **one address per request** — it has no
+batch endpoint — and TALAIA throttles itself to 20 requests a second out of manners
+towards a free public service. That is ~43 minutes for the 51,216 school addresses, and
+it is almost all of a cold boot.
+
+Two levers, both environment variables:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TALAIA_GEOCODE_MIN_INTERVAL_S` | `0.05` | Seconds between requests. `0.02` is 50/s and roughly halves the wait. |
+| `TALAIA_GEOCODE_CONCURRENCY` | `8` | In-flight requests. Raise alongside the interval, not instead of it. |
+
+Results are cached permanently on the volume, so you pay for an address once ever —
+which is also why a re-run after an interruption is much faster than the first.
+
+If you only need one area, filtering by place avoids the question entirely.
+
+### Diagnosing a stuck deployment
+
+`GET /v1/admin/prefetch` also reports `write_health` and `boot_bootstrap`.
+
+`write_health` matters because DuckDB takes a single writer: if something stops making
+progress while holding it, every later write queues behind it. Writes now give up after
+`TALAIA_WRITE_LOCK_TIMEOUT_S` (25s) and return `503` naming the holder, rather than
+hanging forever — the failure mode where reads answer in milliseconds, every button in
+the admin panel appears to do nothing, and nothing is logged because nothing has failed.
+
+`boot_bootstrap` is what became of the background load started at boot. It runs detached, so if it dies its traceback goes to the log and
+It runs detached, so if it dies its traceback goes to the log and nothing else notices —
+`{"state": "failed", "error": "..."}` is how you find out.
 
 ---
 

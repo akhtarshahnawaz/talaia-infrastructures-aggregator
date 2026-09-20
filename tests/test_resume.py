@@ -201,9 +201,13 @@ async def test_the_shared_http_client_is_not_reused_across_event_loops():
 
     def in_another_loop():
         async def grab():          # must be called *inside* the new loop, not as an
-            return net.get_client()  # argument evaluated before asyncio.run starts it
+            client = net.get_client()  # argument evaluated before asyncio.run starts it
+            # Close it here too: a client left open when its loop is torn down raises
+            # "Event loop is closed" later, from whichever test happens to be running.
+            await net.close_client()
+            return id(client)
         return asyncio.run(grab())
 
-    second = await asyncio.to_thread(in_another_loop)
-    assert second is not first, "a different loop must get its own client"
+    second_id = await asyncio.to_thread(in_another_loop)
+    assert second_id != id(first), "a different loop must get its own client"
     await net.close_client()

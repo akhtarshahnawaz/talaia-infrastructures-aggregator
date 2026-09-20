@@ -23,7 +23,7 @@ from .auth import apply_tier_overrides, registry as key_registry
 from .mcp import mcp_router
 from .routers.v1 import (admin_router, meta_router, public_router,
                          router as v1_router)
-from .store import Store, get_store, set_store
+from .store import Store, StoreBusy, get_store, set_store
 
 logging.basicConfig(level=logging.INFO,
                     format="%(levelname)-7s %(name)-22s %(message)s")
@@ -242,6 +242,18 @@ async def timing_and_request_id(request: Request, call_next):
         if day_left >= 0:
             response.headers["x-quota-remaining-today"] = str(day_left)
     return response
+
+
+@app.exception_handler(StoreBusy)
+async def store_busy(request: Request, exc: StoreBusy):
+    """503, not 500: the request was refused, not mishandled, and retrying may work.
+
+    The message names what is holding the writer, because "nothing happened when I
+    pressed the button" is the least actionable bug report there is.
+    """
+    log.error("write refused on %s: %s", request.url.path, exc)
+    return JSONResponse(status_code=503, content={"detail": str(exc)},
+                        headers={"Retry-After": "30"})
 
 
 @app.exception_handler(Exception)

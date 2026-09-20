@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     socrata_base: str = "https://analisi.transparenciacatalunya.cat/resource"
     socrata_app_token: str | None = None
     cartociudad_base: str = "https://www.cartociudad.es/geocoder/api/geocoder"
+    # CartoCiudad resolves one address per request - there is no batch endpoint - so a
+    # national registry costs one call per distinct address and these two numbers set
+    # how long that takes. 20/s is deliberately polite towards a free public service
+    # funded by the Spanish mapping agency: at that rate the 51,216 school addresses
+    # take ~43 minutes, and almost all of a cold boot is this. Raise it if you are in a
+    # hurry and accept the manners; results are cached permanently, so you pay once.
+    geocode_min_interval_s: float = 0.05
+    geocode_concurrency: int = 8
     catastro_base: str = "https://ovc.catastro.meh.es"
     http_timeout_s: float = 30.0
     http_retries: int = 3
@@ -124,6 +132,11 @@ class Settings(BaseSettings):
     email_from: str = ""
     # Development only: log the message instead of sending it.
     email_console: bool = False
+
+    # How long a write may wait for the single writer before giving up. Long enough
+    # that a big bulk upsert ahead of it finishes, short enough that a caller gets an
+    # answer rather than a hung request.
+    write_lock_timeout_s: float = 25.0
 
     # --- server ----------------------------------------------------------
     cors_origins: str = "*"

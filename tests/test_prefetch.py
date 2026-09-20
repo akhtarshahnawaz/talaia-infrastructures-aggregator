@@ -209,3 +209,55 @@ def test_an_unknown_place_name_is_still_a_valid_text_filter():
     against the registries' own municipality column."""
     f = build_filter(place="Cuenca")
     assert f.bbox is None and f.places == frozenset({"cuenca"}) and f.is_partial
+
+
+# ---------------------------------------------------------------------------
+# "Nothing happens when I press the button."
+# ---------------------------------------------------------------------------
+async def test_a_write_gives_up_rather_than_waiting_for_a_stuck_holder(store, monkeypatch):
+    """Every symptom of the outage traced to this: reads answered in 0.3s and writes
+    never answered at all, so revoke, delete, clear, dataset load and cache warm each
+    hung until the browser gave up - silently, because nothing had failed yet.
+    """
+    import asyncio
+
+    from talaia.config import settings
+    from talaia.store import StoreBusy
+
+    monkeypatch.setattr(settings, "write_lock_timeout_s", 0.2)
+    await store._write_lock.acquire()          # stand in for a stalled ingest
+    store._write_holder, store._write_since = "wedged", __import__("time").monotonic()
+    try:
+        with pytest.raises(StoreBusy) as exc:
+            await store.execute_write("SELECT 1")
+        assert "wedged" in str(exc.value)
+        assert "Nothing was changed" in str(exc.value)
+    finally:
+        store._write_holder = store._write_since = None
+        store._write_lock.release()
+
+    # And it recovers once the holder lets go.
+    await store.execute_write("SELECT 1")
+    assert store.write_health()["writes_refused"] == 1
+
+
+async def test_write_health_names_the_holder_while_it_runs(store):
+    """So the panel can say which thing is wedged instead of showing an idle screen."""
+    import asyncio
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder():
+        async with store._writing("slow-ingest"):
+            started.set()
+            await release.wait()
+
+    task = asyncio.create_task(holder())
+    await started.wait()
+    health = store.write_health()
+    assert health["holder"] == "slow-ingest"
+    release.set()
+    await task
+    assert store.write_health()["holder"] is None
+    assert store.write_health()["last_write_ok"] is not None

@@ -825,7 +825,44 @@ async def prefetch_status(request: Request) -> dict[str, Any]:
         })
     sources.sort(key=lambda s: (s["rows"] > 0, s["id"]))
     return {"sources": sources, "run": prefetcher.progress.as_dict(),
-            "running": prefetcher.running, "boot_bootstrap": _boot_task_state(request)}
+            "running": prefetcher.running, "boot_bootstrap": _boot_task_state(request),
+            "write_health": get_store().write_health()}
+
+
+# The 52 provinces as the national registries spell them. They are the column the
+# `place` filter matches, and an operator cannot be expected to guess the accents.
+_ES_PROVINCES = [
+    "A Coruña", "Álava", "Albacete", "Alicante", "Almería", "Asturias", "Ávila",
+    "Badajoz", "Barcelona", "Burgos", "Cáceres", "Cádiz", "Cantabria", "Castellón",
+    "Ceuta", "Ciudad Real", "Córdoba", "Cuenca", "Girona", "Granada", "Guadalajara",
+    "Guipúzcoa", "Huelva", "Huesca", "Illes Balears", "Jaén", "La Rioja", "Las Palmas",
+    "León", "Lleida", "Lugo", "Madrid", "Málaga", "Melilla", "Murcia", "Navarra",
+    "Ourense", "Palencia", "Pontevedra", "Salamanca", "Santa Cruz de Tenerife",
+    "Segovia", "Sevilla", "Soria", "Tarragona", "Teruel", "Toledo", "Valencia",
+    "Valladolid", "Vizcaya", "Zamora", "Zaragoza",
+]
+
+
+@admin_router.get("/places", summary="Place names the prefetch filter will match")
+async def prefetch_places() -> dict[str, Any]:
+    """Suggestions for the place box.
+
+    The provinces are fixed and always offered, because they are what the national
+    registries put in their province column and the filter matches them whether or not
+    anything is loaded yet. Municipalities are read back out of what *is* loaded, so the
+    spelling offered is literally the spelling stored.
+    """
+    municipalities: list[str] = []
+    try:
+        rows = await get_store().fetch(
+            "SELECT DISTINCT address->>'municipality' AS m FROM assets "
+            "WHERE m IS NOT NULL AND m <> '' ORDER BY m LIMIT 2000")
+        municipalities = [r[0] for r in rows]
+    except Exception as exc:  # pragma: no cover - empty or mid-migration store
+        log.debug("municipality suggestions unavailable: %s", exc)
+    return {"provinces": _ES_PROVINCES,
+            "municipalities": municipalities,
+            "regions": [r["key"] for r in region_catalogue()]}
 
 
 @admin_router.post("/prefetch", summary="Load one or more sources now")
