@@ -85,6 +85,29 @@ def duckdb_settings(store) -> dict[str, Any]:
     return out
 
 
+def thread_stacks(limit: int = 12) -> list[dict[str, Any]]:
+    """Where every thread currently is.
+
+    A write that holds the single writer for minutes while using no memory and writing
+    no bytes is not working slowly, it is blocked, and nothing short of the stack says
+    on what. This reports file, line and function - the same information a traceback in
+    the log would carry, and no more.
+    """
+    import sys
+    import threading
+    import traceback
+
+    names = {t.ident: t.name for t in threading.enumerate()}
+    out = []
+    for ident, frame in sys._current_frames().items():
+        stack = traceback.extract_stack(frame)[-limit:]
+        out.append({
+            "thread": names.get(ident, str(ident)),
+            "frames": [f"{f.filename.split('/')[-1]}:{f.lineno} {f.name}" for f in stack],
+        })
+    return out
+
+
 def report(store) -> dict[str, Any]:
     limits = container_limits()
     d = duckdb_settings(store)
@@ -98,5 +121,10 @@ def report(store) -> dict[str, Any]:
         notes.append(
             f"DuckDB is using {d['threads']} threads on "
             f"{limits['cpu_quota_cores']} of a core.")
-    return {"container": limits, "disk": disk(), "duckdb": d,
-            "write_health": store.write_health(), "notes": notes}
+    health = store.write_health()
+    out = {"container": limits, "disk": disk(), "duckdb": d,
+           "write_health": health, "notes": notes}
+    # Only when something is actually stuck: it is cheap, but it is noise otherwise.
+    if health.get("held_for_s", 0) > 10:
+        out["threads"] = thread_stacks()
+    return out
