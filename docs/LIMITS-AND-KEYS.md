@@ -125,8 +125,7 @@ that key alone and pin it against future tier changes.
 
 ### c. CLI — while the service is stopped
 
-On the DuckDB backend the API holds the single writer, so stop the service first. On
-Postgres the CLI can run against a live service.
+The CLI can run against a live service; it is another client of the same database.
 
 ```bash
 python -m talaia key create --tier unlimited --label deepfire-integration

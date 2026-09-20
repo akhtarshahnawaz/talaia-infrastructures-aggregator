@@ -79,9 +79,8 @@ above reported `88 tiles (9 already fresh)` because 9 were warmed earlier.
 
 ### Online, against a running deployment
 
-On the DuckDB backend the API holds the single writer, so a CLI run is simply locked
-out. On Postgres a CLI warm against a live service works — but the admin endpoint is
-still the better tool, because it reports progress and can be stopped.
+A CLI warm against a live service works, but the admin endpoint is the better tool: it
+reports progress and an ETA, and it can be stopped.
 The admin endpoint runs the warm **inside** the serving process instead:
 
 ```bash

@@ -203,8 +203,7 @@ curl localhost:8000/v1/admin/keys -H "X-Admin-Key: $ADMIN"          # prefixes o
 curl -X DELETE localhost:8000/v1/admin/keys/talaia_sk_xTj2zp... -H "X-Admin-Key: $ADMIN"
 ```
 
-The CLI does the same. On Postgres it can run against a live service; on the DuckDB
-backend, stop the service first, because it holds the single writer:
+The CLI does the same, and can run against a live service:
 
 ```bash
 PYTHONPATH=api python -m talaia key create --tier unlimited --label deepfire-integration
@@ -469,23 +468,22 @@ Related: **[EMAIL-SETUP.md](docs/EMAIL-SETUP.md)** (Resend and SMTP) ·
 Single service: a multi-stage Dockerfile (Rust → Node → Python) serves the API and the
 website from one process. An empty store self-bootstraps in-process on boot.
 
-**Storage is pluggable behind the `Store` interface.** Point `TALAIA_DATABASE_URL` at a
-Postgres with PostGIS and the service runs on that; leave it unset and it runs on an
-embedded DuckDB file under `/data`. DuckDB is the right default for development and the
-tests — no second service to run — and the wrong one for a deployment, because it takes a
-single writer, so one stalled ingest blocks every other write including API key
-management. Postgres takes concurrent writers and is what
-[DEPLOY-RAILWAY.md](docs/DEPLOY-RAILWAY.md) sets up.
+**Storage is Postgres + PostGIS.** Set `TALAIA_DATABASE_URL` and the service runs on it;
+[DEPLOY-RAILWAY.md](docs/DEPLOY-RAILWAY.md) sets one up. PostGIS is required, not
+optional — every asset, road and population cell is a geometry, and a plain Postgres
+cannot store them.
+
+A second, embedded backend exists behind the same `Store` interface and is what the test
+suite runs on, so `pytest` needs no database server. It is not a deployment option and
+the guide does not document it as one.
 
 ```bash
-# Postgres (what a deployment runs)
 docker build -t talaia . && docker run -p 8000:8000 \
   -e TALAIA_DATABASE_URL=postgresql://user:pass@host:5432/talaia \
   -e TALAIA_ADMIN_KEY=... talaia
-
-# DuckDB on a volume (development, or a single-user instance)
-docker run -p 8000:8000 -v talaia-data:/data -e TALAIA_ADMIN_KEY=... talaia
 ```
+
+No volume: everything durable lives in the database.
 
 See `.env.example` for the full configuration surface.
 

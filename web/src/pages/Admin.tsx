@@ -837,14 +837,8 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
       <Note>
         A filtered load is recorded as <code>partial</code>, never complete, so the
         source is still picked up in full the next time the service boots.{" "}
-        {data?.write_health?.backend === "postgres" ? (
-          <>Several sources load at once; one run at a time, so a second load waits for
-          this one to finish.</>
-        ) : (
-          <>One source loads at a time, because the DuckDB backend takes a single writer.
-          Set <code>TALAIA_DATABASE_URL</code> to run on Postgres and load them in
-          parallel.</>
-        )}
+        Several sources load at once; one run at a time, so a second load waits for this
+        one to finish.
       </Note>
     </div>
   );
