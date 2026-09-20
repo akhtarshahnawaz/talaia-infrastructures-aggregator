@@ -321,3 +321,32 @@ async def test_a_consumed_signup_is_not_listed_as_pending(store):
         "consumed_at) VALUES ('t', 'used@example.com', '1.2.3.4', ?, ?, ?)",
         [now, now, now])
     assert (await signups())["pending"] == []
+
+
+# ---------------------------------------------------------------------------
+# "Clicking revoke in the admin panel doesn't do anything."
+# ---------------------------------------------------------------------------
+def test_the_admin_panel_never_gates_an_action_on_a_native_dialog():
+    """`window.confirm` is not a reliable way to ask an operator anything.
+
+    A browser may suppress native dialogs and return `false` to the page - Chrome offers
+    "prevent this page from creating additional dialogs" after a couple of them and
+    remembers it, and embedded and automated browsers disable them outright. The page
+    cannot distinguish that from a deliberate Cancel, so a destructive button gated on
+    `confirm()` silently does nothing and the panel looks broken. It was reported as
+    exactly that. The in-app dialog has no such dependency.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for path in (root / "web/src/pages/Admin.tsx",):
+        source = path.read_text()
+        code = "\n".join(
+            line for line in source.splitlines()
+            if not line.lstrip().startswith(("*", "//", "/*")))
+        offenders = re.findall(r"(?<![.\w])(?:window\.)?confirm\s*\(", code)
+        assert not offenders, (
+            f"{path.name} gates an action on window.confirm, which a browser is free to "
+            f"suppress; use the in-app confirmation dialog instead")
+        assert "useConfirm" in source, f"{path.name} should use the in-app dialog"

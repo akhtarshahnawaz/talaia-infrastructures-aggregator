@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Code, Note, Pill } from "../components/ui";
 import {
   AdminAuthError, adminClearPending, adminCreateKey, adminEmailStatus, adminEmailTest,
-  adminListKeys, adminRevokeByEmail, adminRevokeKey, adminSignups, adminUpdateKey,
+  adminDeleteKey, adminListKeys, adminRevokeByEmail, adminRevokeKey, adminSignups,
+  adminUpdateKey,
   adminUsage, adminWarmStart, adminWarmStatus, adminWarmStop, getAdminKey, getCoverage,
   getRegions, getStats, getTiers, num, setAdminKey, type AdminKey,
 } from "../api";
@@ -41,6 +42,58 @@ const btnGhost =
   "rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 transition hover:border-slate-500";
 const btnDanger =
   "rounded-lg border border-rose-800/70 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition hover:border-rose-600";
+
+// ---------------------------------------------------------------------------
+/** In-app confirmation, deliberately not `window.confirm`.
+ *
+ * A browser is free to suppress native dialogs and hand the page back `false`, and it
+ * does: Chrome offers "prevent this page from creating additional dialogs" after a
+ * couple of them and remembers the answer, and embedded or automated browsers disable
+ * them outright. The page cannot tell that apart from the operator clicking Cancel, so
+ * a destructive button gated on `confirm()` silently does nothing - which reads as the
+ * admin panel being broken, and is exactly how this was reported.
+ */
+type Ask = { title: string; body: string; action: string };
+
+function useConfirm() {
+  const [ask, setAsk] = useState<Ask | null>(null);
+  const resolver = useRef<((ok: boolean) => void) | null>(null);
+
+  const request = useCallback(
+    (a: Ask) => new Promise<boolean>((resolve) => { resolver.current = resolve; setAsk(a); }),
+    []);
+
+  const settle = useCallback((ok: boolean) => {
+    setAsk(null);
+    const r = resolver.current;
+    resolver.current = null;
+    r?.(ok);
+  }, []);
+
+  useEffect(() => {
+    if (!ask) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") settle(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [ask, settle]);
+
+  const dialog = ask ? (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4"
+      role="dialog" aria-modal="true" onClick={() => settle(false)}>
+      <div className="w-full max-w-md rounded-xl border border-slate-700 bg-night-900 p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-base font-semibold text-slate-100">{ask.title}</h3>
+        <p className="mt-2 whitespace-pre-line text-sm text-slate-400">{ask.body}</p>
+        <div className="mt-5 flex justify-end gap-2">
+          <button className={btnGhost} onClick={() => settle(false)}>Cancel</button>
+          <button className={btnDanger} autoFocus onClick={() => settle(true)}>{ask.action}</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  return { request, dialog };
+}
 
 // ---------------------------------------------------------------------------
 function SignIn({ onDone }: { onDone: () => void }) {
@@ -101,6 +154,7 @@ function Keys({ notify }: { notify: (s: string) => void }) {
   const [showRevoked, setShowRevoked] = useState(false);
   const [form, setForm] = useState({ label: "", tier: "standard", email: "" });
   const [busy, setBusy] = useState(false);
+  const { request: ask, dialog } = useConfirm();
 
   const load = useCallback(async () => {
     try { setKeys(await adminListKeys()); setError(null); }
@@ -128,9 +182,26 @@ function Keys({ notify }: { notify: (s: string) => void }) {
 
   const revoke = async (k: AdminKey) => {
     const who = k.email ? `${k.email} (${k.prefix})` : k.prefix;
-    if (!confirm(`Revoke ${who}?\n\nThis is immediate and cannot be undone. Any integration using this key will start receiving 401.`))
-      return;
+    if (!await ask({
+      title: `Revoke ${who}?`,
+      body: "This is immediate. Any integration using this key will start receiving 401.\n\n"
+        + "The key stays in the list, marked revoked, so you can still see it was used.",
+      action: "Revoke",
+    })) return;
     try { await adminRevokeKey(k.prefix); notify(`Revoked ${k.prefix}`); await load(); }
+    catch (e: any) { setError(e.message); }
+  };
+
+  const remove = async (k: AdminKey) => {
+    const who = k.email ? `${k.email} (${k.prefix})` : k.prefix;
+    if (!await ask({
+      title: `Delete ${who}?`,
+      body: "The key and its usage history are removed from the database entirely. "
+        + "This cannot be undone, and afterwards there is no record the key existed.\n\n"
+        + "To keep the record, revoke it instead.",
+      action: "Delete permanently",
+    })) return;
+    try { await adminDeleteKey(k.prefix); notify(`Deleted ${k.prefix}`); await load(); }
     catch (e: any) { setError(e.message); }
   };
 
@@ -147,6 +218,7 @@ function Keys({ notify }: { notify: (s: string) => void }) {
 
   return (
     <div className="space-y-6">
+      {dialog}
       {error && <Note kind="warn">{error}</Note>}
 
       {minted && (
@@ -259,11 +331,15 @@ function Keys({ notify }: { notify: (s: string) => void }) {
                   </td>
                   <td className="px-3 py-2.5 text-[11.5px] text-slate-500">{when(k.created_at)}</td>
                   <td className="px-3 py-2.5 text-right">
-                    {!k.revoked_at && k.source !== "env" && (
-                      <button className={btnDanger} onClick={() => revoke(k)}>Revoke</button>
-                    )}
-                    {k.source === "env" && (
+                    {k.source === "env" ? (
                       <span className="text-[11px] text-slate-600">edit env</span>
+                    ) : (
+                      <div className="flex items-center justify-end gap-1.5">
+                        {!k.revoked_at && (
+                          <button className={btnDanger} onClick={() => revoke(k)}>Revoke</button>
+                        )}
+                        <button className={btnGhost} onClick={() => remove(k)}>Delete</button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -286,6 +362,7 @@ function Signups({ notify }: { notify: (s: string) => void }) {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState("");
+  const { request: ask, dialog } = useConfirm();
 
   const load = useCallback(async () => {
     try { setData(await adminSignups()); setError(null); }
@@ -296,7 +373,11 @@ function Signups({ notify }: { notify: (s: string) => void }) {
   const revokeEmail = async () => {
     const target = email.trim();
     if (!target) return;
-    if (!confirm(`Revoke every active key for ${target}?\n\nThey will be able to sign up again from scratch.`)) return;
+    if (!await ask({
+      title: `Revoke every active key for ${target}?`,
+      body: "They will be able to sign up again from scratch.",
+      action: "Revoke",
+    })) return;
     try {
       const r = await adminRevokeByEmail(target);
       notify(`Revoked ${r.revoked.join(", ")} for ${target}`);
@@ -315,6 +396,7 @@ function Signups({ notify }: { notify: (s: string) => void }) {
 
   return (
     <div className="space-y-6">
+      {dialog}
       {error && <Note kind="warn">{error}</Note>}
 
       <Card className="p-5">

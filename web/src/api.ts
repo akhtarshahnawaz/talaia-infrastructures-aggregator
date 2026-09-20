@@ -200,6 +200,10 @@ export const adminUpdateKey = (prefix: string, body: Record<string, any>) =>
     { method: "PATCH", body: JSON.stringify(body) });
 export const adminRevokeKey = (prefix: string) =>
   admin<any>(`/v1/admin/keys/${encodeURIComponent(prefix)}`, { method: "DELETE" });
+// Removes the row and its usage history, rather than marking it revoked.
+export const adminDeleteKey = (prefix: string) =>
+  admin<any>(`/v1/admin/keys/${encodeURIComponent(prefix)}?purge=true`,
+    { method: "DELETE" });
 export const adminRevokeByEmail = (email: string) =>
   admin<any>(`/v1/admin/keys?email=${encodeURIComponent(email)}`, { method: "DELETE" });
 

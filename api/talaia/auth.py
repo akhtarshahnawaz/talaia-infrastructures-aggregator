@@ -374,6 +374,35 @@ class KeyRegistry:
         log.info("api key updated: %s -> tier=%s", prefix, values.tier)
         return values
 
+    async def purge(self, store, prefix: str) -> bool:
+        """Delete a key outright, along with its usage history.
+
+        Revoking is the safe default and what the list keeps showing: a revoked key is
+        evidence, and an operator working out why an integration started 401ing wants to
+        find it. Purging is for the other case - a test key, a typo, a signup someone
+        wants erased - where keeping the row is clutter or, for an erasure request, the
+        wrong answer. It cannot be undone and it cannot be inferred from what is left.
+        """
+        candidates = [prefix, prefix.rstrip("."), prefix.rstrip(".") + "..."]
+        rows: list = []
+        for candidate in dict.fromkeys(candidates):
+            rows = await store.fetch(
+                "SELECT key_hash FROM api_keys WHERE prefix = ?", [candidate])
+            if rows:
+                break
+        if not rows:
+            return False
+        for (key_hash,) in rows:
+            # Usage rows join on key_hash, so leaving them behind would orphan them
+            # against a key nobody can identify any more.
+            await store.execute_write(
+                "DELETE FROM key_usage WHERE key_hash = ?", [key_hash])
+            await store.execute_write(
+                "DELETE FROM api_keys WHERE key_hash = ?", [key_hash])
+            self._by_hash.pop(key_hash, None)
+        log.info("api key deleted: %s", prefix)
+        return True
+
     async def revoke_by_email(self, store, email: str) -> list[str]:
         """Revoke every active key for an address. Returns the prefixes revoked.
 

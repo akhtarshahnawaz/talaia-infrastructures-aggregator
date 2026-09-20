@@ -150,6 +150,24 @@ curl -X DELETE "$TALAIA/v1/admin/keys?email=them@example.com" -H "X-Admin-Key: $
 Or the **Signups** tab in the admin panel, which has a "revoke by email" box. Once
 revoked, the address is free to sign up again from scratch.
 
+### Revoking versus deleting
+
+Revoking is the default and it **keeps the row**, marked revoked and hidden behind "Show
+revoked" in the panel. That is deliberate: when an integration starts returning `401`,
+the first question is which key stopped working and when, and a deleted row cannot answer
+it.
+
+Deleting removes the key and its usage history outright. Use it for a test key, a typo,
+or an erasure request — cases where the record itself is the thing you want gone.
+
+```bash
+curl -X DELETE "$TALAIA/v1/admin/keys/talaia_sk_vFeU5W...?purge=true" \
+  -H "X-Admin-Key: $ADMIN"
+```
+
+In the panel every database-backed key has both buttons. Neither can touch a key from
+`TALAIA_API_KEYS`, which lives in the environment rather than the database.
+
 ### Upgrading an existing key
 
 Someone signed up on the free tier and needs more. Change the tier in place — the secret

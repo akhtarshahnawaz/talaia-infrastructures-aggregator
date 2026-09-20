@@ -410,3 +410,85 @@ async def test_an_already_revoked_key_is_not_revoked_twice(store):
                                  email="twice@example.com")
     assert len(await reg.revoke_by_email(store, "twice@example.com")) == 1
     assert await reg.revoke_by_email(store, "twice@example.com") == []
+
+
+# ---------------------------------------------------------------------------
+# Deleting a key outright, as opposed to revoking it.
+# ---------------------------------------------------------------------------
+async def _keys_table(store):
+    await store.execute_write(
+        "CREATE TABLE IF NOT EXISTS api_keys (key_hash VARCHAR PRIMARY KEY, "
+        "prefix VARCHAR, label VARCHAR, tier VARCHAR, rate_limit_per_min INTEGER, "
+        "daily_quota INTEGER, max_aoi_km2 DOUBLE, max_assets INTEGER, email VARCHAR, "
+        "organisation VARCHAR, created_ip VARCHAR, created_at TIMESTAMP, "
+        "revoked_at TIMESTAMP, last_used_at TIMESTAMP, request_count BIGINT)")
+    await store.execute_write(
+        "CREATE TABLE IF NOT EXISTS key_usage (key_hash VARCHAR, day VARCHAR, "
+        "requests BIGINT)")
+
+
+async def test_revoking_keeps_the_row_but_purging_removes_it(store):
+    """The two are different operations and the difference is the whole point: a revoked
+    key is evidence of why an integration started 401ing, a purged one is gone."""
+    reg = KeyRegistry()
+    await _keys_table(store)
+    _, revoked = await reg.create(store, label="revoke-me")
+    _, purged = await reg.create(store, label="purge-me")
+
+    assert await reg.revoke(store, revoked.prefix) is True
+    assert await reg.purge(store, purged.prefix) is True
+
+    prefixes = {k["prefix"] for k in await reg.list_keys(store)}
+    assert revoked.prefix in prefixes, "revoking must not delete the record"
+    assert purged.prefix not in prefixes, "purging must delete the record"
+
+
+async def test_purging_takes_the_usage_history_with_it(store):
+    """Usage rows join on key_hash, so leaving them behind orphans them against a key
+    nobody can identify any more."""
+    reg = KeyRegistry()
+    await _keys_table(store)
+    raw, record = await reg.create(store, label="busy")
+    await store.execute_write(
+        "INSERT INTO key_usage VALUES (?, '2026-09-19', 42)", [hash_key(raw)])
+
+    assert await reg.purge(store, record.prefix) is True
+    rows = await store.fetch("SELECT count(*) FROM key_usage WHERE key_hash = ?",
+                             [hash_key(raw)])
+    assert rows[0][0] == 0
+
+
+async def test_purging_accepts_the_prefix_with_or_without_the_ellipsis(store):
+    """Same trap as revoke: the pasteable form carries the dots, the typeable one does
+    not."""
+    reg = KeyRegistry()
+    await _keys_table(store)
+    for typed in (lambda p: p, lambda p: p.rstrip(".")):
+        _, record = await reg.create(store, label="x")
+        assert await reg.purge(store, typed(record.prefix)) is True
+
+
+async def test_purging_works_on_an_already_revoked_key(store):
+    """Revoke-then-delete is the normal path through the admin panel, so purge must not
+    be limited to keys that are still active the way revoke is."""
+    reg = KeyRegistry()
+    await _keys_table(store)
+    _, record = await reg.create(store, label="two-step")
+    assert await reg.revoke(store, record.prefix) is True
+    assert await reg.purge(store, record.prefix) is True
+    assert not await reg.list_keys(store)
+
+
+async def test_purging_an_unknown_prefix_reports_failure(store):
+    reg = KeyRegistry()
+    await _keys_table(store)
+    assert await reg.purge(store, "talaia_sk_nope...") is False
+
+
+async def test_a_purged_key_stops_authenticating(store):
+    reg = KeyRegistry()
+    await _keys_table(store)
+    raw, record = await reg.create(store, label="gone")
+    assert reg.verify(raw) is not None
+    await reg.purge(store, record.prefix)
+    assert reg.verify(raw) is None

@@ -838,8 +838,19 @@ async def stop_warm() -> dict[str, Any]:
     return {"cancelled": True, **warmer.progress.as_dict()}
 
 
-@admin_router.delete("/keys/{prefix}", summary="Revoke a key by prefix")
-async def revoke_key(prefix: str) -> dict[str, Any]:
+@admin_router.delete("/keys/{prefix}", summary="Revoke, or delete, a key by prefix")
+async def revoke_key(prefix: str, purge: bool = False) -> dict[str, Any]:
+    """Revoke by default; ``?purge=true`` removes the row and its usage history.
+
+    Revoking keeps the record, which is what an operator tracing a sudden 401 needs.
+    Purging is for a test key, a typo, or an erasure request, where the row itself is
+    the thing to be rid of.
+    """
+    if purge:
+        ok = await key_registry.purge(get_store(), prefix)
+        if not ok:
+            raise HTTPException(status_code=404, detail="No key with that prefix.")
+        return {"deleted": prefix}
     ok = await key_registry.revoke(get_store(), prefix)
     if not ok:
         raise HTTPException(status_code=404, detail="No active key with that prefix.")
