@@ -106,17 +106,24 @@ class IngestFilter:
             bits.append(f"limit={self.limit:,}")
         return ", ".join(bits) or "everything"
 
+    _PLACE_FIELDS = ("municipality", "province", "comarca", "region", "locality", "town")
+
     def wanted_place(self, item: "RawAsset") -> bool:
-        """Text test, applied before any geocoding."""
+        """Text test, applied before any geocoding.
+
+        A record that carries no place at all cannot be judged by name - the population
+        grid publishes cells, not addresses - so it passes here and is left to the
+        coordinate test. Dropping it instead would mean naming a city silently emptied
+        every source that does not happen to publish a municipality column.
+        """
         if not self.places:
             return True
         from ..norm import fold
         addr = item.address or {}
-        for key in ("municipality", "province", "region", "locality", "town"):
-            value = fold(addr.get(key))
-            if value and value in self.places:
-                return True
-        return False
+        values = [fold(addr.get(k)) for k in self._PLACE_FIELDS]
+        if not any(values):
+            return True
+        return any(v and v in self.places for v in values)
 
     def wanted_point(self, lon: float | None, lat: float | None) -> bool:
         """Coordinate test. Unknown coordinates pass; they are judged after geocoding."""

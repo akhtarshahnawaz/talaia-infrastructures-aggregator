@@ -168,3 +168,44 @@ async def test_only_one_prefetch_runs_at_a_time(store):
     with pytest.raises(RuntimeError, match="already running"):
         p.start(store, [], IngestFilter())
     await p._task
+
+
+async def test_a_record_with_no_place_at_all_is_left_to_the_coordinate_test(store):
+    """The population grid publishes cells, not addresses. Judging it by municipality
+    name would mean naming a city silently emptied the source."""
+    class Cells(Fake):
+        def normalise(self, raw):
+            yield RawAsset(source_ref=str(raw["i"]), name="cell", subcategory="school",
+                           lon=2.8, lat=41.98)          # in the Girona box
+        async def fetch(self, **kwargs):
+            for i in range(4):
+                yield {"i": i}
+
+    conn = Cells()
+    assert await conn.ingest(store, select=build_filter(place="Girona")) == 4
+
+
+async def test_a_place_outside_the_named_box_is_still_dropped(store):
+    class Cells(Fake):
+        def normalise(self, raw):
+            yield RawAsset(source_ref=str(raw["i"]), name="cell", subcategory="school",
+                           lon=2.17, lat=41.39)         # Barcelona, not Girona
+        async def fetch(self, **kwargs):
+            for i in range(4):
+                yield {"i": i}
+
+    conn = Cells()
+    assert await conn.ingest(store, select=build_filter(place="Girona")) == 0
+
+
+def test_a_known_place_name_also_supplies_a_bounding_box():
+    """So a source with coordinates and no municipality column can still be narrowed."""
+    assert build_filter(place="Girona").bbox is not None
+    assert build_filter(place="Girona").places == frozenset({"girona"})
+
+
+def test_an_unknown_place_name_is_still_a_valid_text_filter():
+    """The gazetteer only covers Catalonia; naming a Castilian province must still work
+    against the registries' own municipality column."""
+    f = build_filter(place="Cuenca")
+    assert f.bbox is None and f.places == frozenset({"cuenca"}) and f.is_partial

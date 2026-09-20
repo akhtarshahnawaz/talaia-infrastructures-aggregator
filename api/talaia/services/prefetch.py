@@ -101,6 +101,17 @@ def build_filter(place: str | None = None, region: str | None = None,
             raise ValueError(
                 f"Unknown region {region!r}. See GET /v1/regions for the list.")
         bbox = entry.bbox
+    elif places:
+        # A named place that the gazetteer also knows gets its bounding box for free.
+        # Sources that publish coordinates but no municipality column - the population
+        # grid, some of the Catalan registries - can only be filtered geographically,
+        # and the operator naming "Girona" plainly means the place, not the string.
+        boxes = [r.bbox for key, r in REGIONS.items()
+                 if fold(key) in places or fold(r.name) in places
+                 or any(fold(key) == p or fold(r.name).startswith(p) for p in places)]
+        if boxes:
+            bbox = (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                    max(b[2] for b in boxes), max(b[3] for b in boxes))
     if limit is not None and limit <= 0:
         raise ValueError("limit must be a positive number of records.")
     return IngestFilter(bbox=bbox, places=places, limit=limit)
