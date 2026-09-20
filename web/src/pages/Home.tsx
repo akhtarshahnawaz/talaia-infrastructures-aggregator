@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import HeroScene from "../components/HeroScene";
 import { Card, Code, Pill, Stat } from "../components/ui";
 import { CATEGORY_COLOR, getStats, num } from "../api";
 
@@ -25,6 +26,12 @@ export default function Home() {
   return (
     <div className="mx-auto max-w-7xl px-5">
       <section className="py-16 sm:py-24">
+        {/* Two columns from lg up. Below that the scene drops under the buttons rather
+            than being hidden: it is the clearest statement of what the service does,
+            and a phone is where someone is most likely to be meeting it for the
+            first time. */}
+        <div className="grid items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(0,520px)]">
+        <div>
         <Pill color="#f97316">HackBarna 2026 · DeepFire “Values at Risk”</Pill>
         <h1 className="mt-6 max-w-4xl text-4xl font-semibold leading-tight tracking-tight text-slate-50 sm:text-6xl">
           Give it a polygon.<br />
@@ -51,6 +58,10 @@ export default function Home() {
           <Link to="/docs" className="rounded-lg border border-slate-700 px-5 py-2.5 text-sm font-medium text-slate-300 transition hover:border-slate-600 hover:text-white">
             Read the API docs
           </Link>
+        </div>
+        </div>
+
+        <HeroScene />
         </div>
 
         {stats && (
