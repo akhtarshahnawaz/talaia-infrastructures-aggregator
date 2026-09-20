@@ -560,8 +560,8 @@ python -m talaia ingest
 ```
 
 On Postgres this is safe to run **while the API is serving**: the cron container is just
-another client, and its writes do not block the API's. Point it at the same
-`TALAIA_DATABASE_URL` and give it the same image.
+another client, and its writes do not block the API's. Give it the same image and a
+reference to the same database; it needs no volume.
 
 On the DuckDB backend it is not — a second process cannot open the file for writing while
 the API holds it — so there the only options are stopping the service first or using the
@@ -616,10 +616,19 @@ pace with `TALAIA_WARM_PAUSE_S` and come back later rather than pushing through.
 and because only hashes are stored there is no way to reconstruct them or to tell whose
 they were.
 
+`pg_dump` has to reach the database. Inside Railway's private network that is
+`DATABASE_URL`; from your own machine it needs the service's **TCP Proxy** enabled, which
+gives you a `DATABASE_PUBLIC_URL`:
+
 ```bash
-# Postgres: a full logical dump, restorable with psql
-railway run --service Postgres pg_dump "$DATABASE_URL" > talaia-$(date +%F).sql
+# From your machine, with the TCP proxy on (needs pg_dump installed locally)
+pg_dump "$DATABASE_PUBLIC_URL" > talaia-$(date +%F).sql
+
+# Or from inside the network, no proxy and no local pg_dump needed
+railway ssh --service Postgres -- pg_dump "$DATABASE_URL" > talaia-$(date +%F).sql
 ```
+
+Restore with `psql "$DATABASE_URL" < talaia-2026-01-01.sql`.
 
 Railway does not snapshot for you unless the template you deployed says it does. Check
 whether yours is PITR-capable; if not, run the dump on a schedule and keep it somewhere
@@ -665,20 +674,31 @@ signups, the tile cache, the enrichment cache, and the assets, networks and popu
 grid. It upserts on the primary key, so it is safe to re-run and safe to interrupt.
 
 1. **Add the PostGIS database** (step 3) but do not point the API at it yet.
-2. **Stop the API service**, so nothing is writing to the DuckDB file while it is read.
-3. **Run the migration** from a container that has both the volume and the database:
+2. **Set `TALAIA_DATABASE_URL`** on the API service as a reference to the PostGIS
+   service, and add `TALAIA_AUTO_BOOTSTRAP=false` for now. Redeploy. The service comes
+   up on an empty Postgres and stays up; the DuckDB file on the volume is untouched.
+3. **Run the migration inside that container**, which is the only place that can see
+   both the volume and the database:
 
    ```bash
-   railway run python -m talaia migrate --to "$DATABASE_URL"
+   railway ssh --service <your-api-service>
+   # then, at the container's shell:
+   python -m talaia migrate --db /data/talaia.duckdb
    ```
 
-   It prints a row count per table when it finishes:
+   `--to` is not needed: inside the container `TALAIA_DATABASE_URL` is already set, and
+   the migration uses it. It prints a row count per table when it finishes:
 
    ```json
    { "api_keys": 14, "assets": 348291, "enrichment_cache": 55102, ... }
    ```
 
-4. **Set `TALAIA_DATABASE_URL`** on the API service (step 4) and redeploy.
+   > `railway run` will **not** do this. It runs the command on your own machine with
+   > Railway's variables injected, and your machine has no `/data`. It has to be
+   > `railway ssh`, or a one-off deploy whose start command is the migration.
+
+4. **Remove `TALAIA_AUTO_BOOTSTRAP=false`** and redeploy, so anything the old store was
+   missing is loaded in the background as usual.
 5. **Check it took**, before you detach anything:
 
    ```bash
