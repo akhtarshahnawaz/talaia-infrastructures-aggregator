@@ -127,6 +127,15 @@ class SourceMeta(BaseModel):
     provides: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     commercial_use: bool = True
+    # Plain prose for the sources page. `provides` and `limitations` say what the
+    # columns are; these say what the thing *is* and why we hold it, which is what
+    # someone deciding whether to trust a number actually needs.
+    description: str = ""
+    used_for: str = ""
+    # Set on sources that publish an address and no coordinate. The text names what is
+    # being approximated, because a point derived from a place name is a different kind
+    # of claim from a point the publisher surveyed.
+    geocoding: str | None = None
 
 
 class SourceStatus(BaseModel):

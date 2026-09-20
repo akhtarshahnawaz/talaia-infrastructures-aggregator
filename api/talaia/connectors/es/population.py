@@ -41,6 +41,15 @@ CSV_MEMBER_HINT = "GEOSTAT_grid_POP_1K_2011"
 class PopulationGrid(Connector):
     meta = SourceMeta(
         id="es.ine.popgrid",
+        description=(
+            "The GEOSTAT / INE population grid: resident population counted into 1 km "
+            "cells from the census, covering all of Spain."),
+        used_for=(
+            "The only source of people who are not at a named facility — everyone at "
+            "home. It produces the per-cell population surface returned by /v1/population "
+            "and the residential headcount in an exposure report. Cells are census "
+            "residents at night, so they understate a beach in August and overstate an "
+            "office district at noon."),
         name="Population grid 1 km (GEOSTAT / INE census)",
         publisher="Eurostat GISCO with INE (Instituto Nacional de Estadistica)",
         tier="resident", coverage="Spain (European grid)", country="ES",

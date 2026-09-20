@@ -17,10 +17,19 @@ es.meq.schools          ~35,300   geocoded    no enrolment - see below
 ======================  ========  ==========  ===============================
 
 **Geocoding is the cost here.** Only the CSIC file ships coordinates; the other three
-publish addresses. Measured against CartoCiudad at 11 requests/second with a 100% match
-rate at street-number precision, that is roughly 75 minutes for a cold national load.
-Results are cached permanently by normalised address, so it is paid once and a re-ingest
-is free. The bootstrap runs in the background, so the service answers throughout.
+publish addresses. Resolving those against CartoCiudad means one HTTP request per
+address - ~55,000 of them against a free service run by the national mapping agency -
+which took roughly 75 minutes for a cold national load and is not a reasonable thing to
+do to somebody else's server.
+
+So the default is offline: one 3.2 MB place-name table resolves a municipality to a
+point in memory, and the whole national school registry loads in under a minute with no
+geocoding traffic at all. The price is precision. A municipality centroid is not a
+building, and at the scale of a fire perimeter that can put an asset on the wrong side
+of the line, so every such point is marked ``geocode_approximate`` and the sources page
+says so. A deployment making real evacuation decisions should set
+``TALAIA_GEOCODE_MODE=hybrid``, which keeps the offline pass and sends only what it
+could not place to the street-level geocoder.
 
 **On REGCESS.** REGCESS is the legal register of health centres, but it publishes no bulk
 extract - it is a Struts search application with a CSRF token, AJAX-populated dropdowns,
@@ -144,6 +153,23 @@ _HOSPITAL_KINDS = {
 class NationalHospitals(Connector):
     meta = SourceMeta(
         id="es.msan.hospitales",
+        description=(
+            "The Ministry of Health's national hospital catalogue: every hospital in "
+            "Spain, public and private, with its functional bed count and the health "
+            "service that runs it. Published annually as a single spreadsheet."),
+        used_for=(
+            "Hospitals are both a concentration of people who cannot self-evacuate and a "
+            "response asset a fire must not cut off. Bed count drives the people-at-risk "
+            "estimate (beds x 2.2, covering staff and visitors) and the triage score "
+            "treats them as critical infrastructure."),
+        geocoding=(
+            "This registry publishes a postal address and no coordinate, so every record "
+            "has to be placed on the map before it can be counted inside a fire "
+            "perimeter. TALAIA does that offline from a bulk place-name table, which "
+            "resolves the municipality to its centre rather than the building. The point "
+            "therefore means the town, not the street: out by a few hundred metres in a "
+            "village and by several kilometres in a city. For production use, run the "
+            "street-level geocoder with TALAIA_GEOCODE_MODE=hybrid."),
         name="Catálogo Nacional de Hospitales",
         publisher="Ministerio de Sanidad",
         tier="resident", coverage="Spain", country="ES",
@@ -222,6 +248,23 @@ class NationalHospitals(Connector):
 class PrimaryCareCentres(Connector):
     meta = SourceMeta(
         id="es.msan.siap",
+        description=(
+            "SIAP, the Ministry of Health's register of primary-care centres — health "
+            "centres and local clinics, the tier below a hospital. This is the only "
+            "national source for them, and it is how TALAIA sees primary care outside "
+            "Catalonia."),
+        used_for=(
+            "Primary-care centres are evacuation and triage points during an incident, "
+            "and losing one displaces demand onto the nearest hospital. They are scored "
+            "as response assets rather than by headcount, which is not published."),
+        geocoding=(
+            "This registry publishes a postal address and no coordinate, so every record "
+            "has to be placed on the map before it can be counted inside a fire "
+            "perimeter. TALAIA does that offline from a bulk place-name table, which "
+            "resolves the municipality to its centre rather than the building. The point "
+            "therefore means the town, not the street: out by a few hundred metres in a "
+            "village and by several kilometres in a city. For production use, run the "
+            "street-level geocoder with TALAIA_GEOCODE_MODE=hybrid."),
         name="Catálogo de Centros de Atención Primaria (SIAP)",
         publisher="Ministerio de Sanidad",
         tier="resident", coverage="Spain", country="ES",
@@ -312,6 +355,20 @@ CSIC_PROVINCES = [
 class CareHomes(Connector):
     meta = SourceMeta(
         id="es.csic.carehomes",
+        description=(
+            "The CSIC's national register of residential care homes for older people, "
+            "published per province with the number of places each home is licensed for."),
+        used_for=(
+            "Care homes are the highest-priority asset class in a wildfire evacuation: "
+            "the residents are the least able to move themselves and need the most "
+            "notice. Licensed places x 1.33 estimates people present including night "
+            "staff, and the triage score weights them accordingly."),
+        geocoding=(
+            "Most records carry published coordinates. The minority that do not are "
+            "placed offline from a bulk place-name table, at the centre of their "
+            "municipality rather than the building, and are marked geocode_approximate so "
+            "they can be told apart. Setting TALAIA_GEOCODE_MODE=hybrid resolves those "
+            "few to street level."),
         name="Residencias de mayores (CSIC, Envejecimiento en Red)",
         publisher="CSIC - Centro de Ciencias Humanas y Sociales",
         tier="resident", coverage="Spain", country="ES",
@@ -460,6 +517,24 @@ _SCHOOL_RULES: list[tuple[tuple[str, ...], str]] = [
 class NationalSchools(Connector):
     meta = SourceMeta(
         id="es.meq.schools",
+        description=(
+            "The Ministry of Education's state register of non-university teaching "
+            "centres: every school, nursery, language school and vocational college in "
+            "Spain, with its type and ownership. The largest single registry TALAIA "
+            "holds."),
+        used_for=(
+            "Schools concentrate children during the day and are frequently designated "
+            "shelters at night, so they matter twice. Outside Catalonia this is the only "
+            "national source, and enrolment is not published — headcount falls back to a "
+            "class-size estimate from the centre type."),
+        geocoding=(
+            "This registry publishes a postal address and no coordinate, so every record "
+            "has to be placed on the map before it can be counted inside a fire "
+            "perimeter. TALAIA does that offline from a bulk place-name table, which "
+            "resolves the municipality to its centre rather than the building. The point "
+            "therefore means the town, not the street: out by a few hundred metres in a "
+            "village and by several kilometres in a city. For production use, run the "
+            "street-level geocoder with TALAIA_GEOCODE_MODE=hybrid."),
         name="Registro Estatal de Centros Docentes no Universitarios",
         publisher="Ministerio de Educación, Formación Profesional y Deportes",
         tier="resident", coverage="Spain", country="ES",

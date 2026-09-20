@@ -5,6 +5,7 @@ export interface SourceMeta {
   country: string; licence: string; licence_url?: string | null; url?: string | null;
   categories: string[]; update_cadence: string; provides: string[];
   limitations: string[]; commercial_use: boolean;
+  description?: string; used_for?: string; geocoding?: string | null;
 }
 export interface SourceStatus {
   source: SourceMeta; rows: number; last_run_at?: string | null;

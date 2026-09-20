@@ -280,17 +280,48 @@ class Connector(ABC):
                              ) -> tuple[list[dict], int]:
         """Resolve address-only records to coordinates, carrying geocoder quality into
         the asset's confidence so a street-level match outranks a town centroid."""
+        from .es import gazetteer
         from .es.cartociudad import geocode_many
-        from ..norm import asset_id, point_wkt
+        from ..config import settings
+        from ..norm import asset_id, geocode_query, point_wkt
         from ..taxonomy import get_subcategory
 
-        from ..norm import geocode_query
+        mode = (settings.geocode_mode or "offline").lower()
+        results: list[dict | None] = [None] * len(items)
 
-        queries = [geocode_query((i.address or {}).get("street"),
-                                 (i.address or {}).get("municipality")) or ""
-                   for i in items]
-        log.info("%s: geocoding %s addresses via CartoCiudad", self.meta.id, len(queries))
-        results = await geocode_many(queries, store)
+        # Offline first unless explicitly told otherwise. One 3.2 MB table resolves a
+        # municipality to a point in memory; the alternative is one HTTP request per
+        # address against somebody else's free server.
+        if mode in ("offline", "hybrid"):
+            table = await gazetteer.load(store)
+            for idx, item in enumerate(items):
+                addr = item.address or {}
+                results[idx] = gazetteer.lookup(
+                    table, addr.get("municipality"), addr.get("province"))
+            got = sum(1 for r in results if r)
+            log.info("%s: %s/%s placed offline from the gazetteer",
+                     self.meta.id, f"{got:,}", f"{len(items):,}")
+
+        if mode in ("hybrid", "street"):
+            need = [i for i, r in enumerate(results) if r is None]
+            if need:
+                queries = [geocode_query((items[i].address or {}).get("street"),
+                                         (items[i].address or {}).get("municipality")) or ""
+                           for i in need]
+                log.info("%s: geocoding %s addresses via CartoCiudad",
+                         self.meta.id, f"{len(queries):,}")
+                for idx, res in zip(need, await geocode_many(queries, store)):
+                    if res:
+                        results[idx] = res
+            if mode == "street":
+                # Offline is the safety net here, not the first answer.
+                missing = [i for i, r in enumerate(results) if r is None]
+                if missing:
+                    table = await gazetteer.load(store)
+                    for idx in missing:
+                        addr = items[idx].address or {}
+                        results[idx] = gazetteer.lookup(
+                            table, addr.get("municipality"), addr.get("province"))
 
         rows: list[dict] = []
         failed = 0
@@ -309,6 +340,10 @@ class Connector(ABC):
                 "geocode_quality": res.get("quality"),
                 "geocode_match_type": res.get("match_type"),
                 "geocoder": res.get("geocoder"),
+                # Loud on purpose. A point placed at a town centroid can sit inside a
+                # fire perimeter the building is outside of, or the reverse, and anyone
+                # acting on this row needs to know which kind of point it is.
+                "geocode_approximate": bool(res.get("approximate")),
             })
             if res.get("cadastral_ref"):
                 attributes["cadastral_ref"] = res["cadastral_ref"]

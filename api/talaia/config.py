@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     # take ~43 minutes, and almost all of a cold boot is this. Raise it if you are in a
     # hurry and accept the manners; results are cached permanently, so you pay once.
     geocode_min_interval_s: float = 0.05
+    # How addresses become points.
+    #   offline - bulk place-name table only. No network, whole registry in seconds,
+    #             municipality-centroid accuracy. The default: it is the only option
+    #             that does not put 55,000 requests through somebody else's free server.
+    #   hybrid  - offline first, then the street-level geocoder for what is left.
+    #             What a production deployment making evacuation decisions should use.
+    #   street  - street-level geocoder first, offline only as a fallback.
+    geocode_mode: str = "offline"
+    geonames_url: str = "https://download.geonames.org/export/dump/ES.zip"
     geocode_concurrency: int = 8
     catastro_base: str = "https://ovc.catastro.meh.es"
     http_timeout_s: float = 30.0

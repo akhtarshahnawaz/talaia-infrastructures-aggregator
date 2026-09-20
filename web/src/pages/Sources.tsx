@@ -81,6 +81,34 @@ export default function Sources() {
                     {s.categories.slice(0, 6).map((c) => <Pill key={c}>{c}</Pill>)}
                   </div>
 
+                  {s.description && (
+                    <p className="mt-3 text-sm leading-relaxed text-slate-300">
+                      {s.description}
+                    </p>
+                  )}
+
+                  {s.used_for && (
+                    <div className="mt-3">
+                      <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                        How TALAIA uses it
+                      </div>
+                      <p className="mt-1 text-sm leading-relaxed text-slate-400">
+                        {s.used_for}
+                      </p>
+                    </div>
+                  )}
+
+                  {s.geocoding && (
+                    <div className="mt-3 rounded-lg border border-amber-800/60 bg-amber-500/5 p-3">
+                      <div className="text-[11px] uppercase tracking-wider text-amber-400/90">
+                        Positions are approximate — this source needs geocoding
+                      </div>
+                      <p className="mt-1 text-sm leading-relaxed text-slate-300">
+                        {s.geocoding}
+                      </p>
+                    </div>
+                  )}
+
                   <div className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
                     <div>
                       <div className="text-[11px] uppercase tracking-wider text-slate-500">Provides</div>

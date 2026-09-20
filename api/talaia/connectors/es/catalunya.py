@@ -41,6 +41,13 @@ def _addr(row: dict, street_key: str, **extra: str) -> dict:
 class CatSchools(Connector):
     meta = SourceMeta(
         id="es.cat.schools",
+        description=(
+            "The Catalan education department's directory of teaching centres, with "
+            "published coordinates and the centre's full type classification."),
+        used_for=(
+            "The Catalan detail layer for education: better positioned than the national "
+            "register and joined to per-centre enrolment, so schools in Catalonia carry a "
+            "real headcount rather than an estimate."),
         name="Directori de centres educatius de Catalunya",
         publisher="Departament d'Educacio i Formacio Professional",
         tier="resident", coverage="Catalonia", country="ES",
@@ -148,6 +155,14 @@ class CatEnrolments(Connector):
 
     meta = SourceMeta(
         id="es.cat.enrolments",
+        description=(
+            "Enrolment counts per Catalan centre and teaching programme, published "
+            "annually by the education department. Not locations — numbers that attach to "
+            "a centre already known from the directory."),
+        used_for=(
+            "Turns a Catalan school from a dot into a headcount, which is the single "
+            "biggest input to its triage score. Enrolment is a register count, not "
+            "attendance, so it overstates a school at night and in August."),
         name="Matricules per centre i ensenyament",
         publisher="Departament d'Educacio i Formacio Professional",
         tier="enrichment", coverage="Catalonia", country="ES",
@@ -196,6 +211,22 @@ class CatEnrolments(Connector):
 class CatSocialServices(Connector):
     meta = SourceMeta(
         id="es.cat.reses",
+        description=(
+            "RESES, the Catalan register of social-services entities and establishments: "
+            "residential care homes, day centres, sheltered housing and disability "
+            "services, with the places each is authorised for."),
+        used_for=(
+            "The Catalan equivalent of the CSIC register and the reason the offline "
+            "geocoder exists at all — these are the sites where a late warning costs "
+            "lives, and without a coordinate they would be invisible to a polygon query."),
+        geocoding=(
+            "This registry publishes a postal address and no coordinate, so every record "
+            "has to be placed on the map before it can be counted inside a fire "
+            "perimeter. TALAIA does that offline from a bulk place-name table, which "
+            "resolves the municipality to its centre rather than the building. The point "
+            "therefore means the town, not the street: out by a few hundred metres in a "
+            "village and by several kilometres in a city. For production use, run the "
+            "street-level geocoder with TALAIA_GEOCODE_MODE=hybrid."),
         name="Registre d'entitats, serveis i establiments socials (RESES)",
         publisher="Departament de Drets Socials i Inclusio",
         tier="resident", coverage="Catalonia", country="ES",
@@ -268,6 +299,16 @@ class CatSocialServices(Connector):
 class CatFacilities(Connector):
     meta = SourceMeta(
         id="es.cat.equipaments",
+        description=(
+            "The Generalitat's register of public facilities across Catalonia — "
+            "healthcare, education, heritage, sport, emergency services, tourism and "
+            "transport — with coordinates, addresses and contact details. The broadest "
+            "single source TALAIA holds."),
+        used_for=(
+            "The backbone of Catalan coverage: it supplies most of the asset inventory "
+            "and the contact details an incident commander needs to actually reach a "
+            "site. Category granularity varies, so it is conflated with the specialised "
+            "registers rather than trusted alone."),
         name="Equipaments de Catalunya",
         publisher="Direccio General de Serveis Digitals i Experiencia Ciutadana",
         tier="resident", coverage="Catalonia", country="ES",
@@ -402,6 +443,15 @@ class CatFacilities(Connector):
 class CatLivestock(Connector):
     meta = SourceMeta(
         id="es.cat.livestock",
+        description=(
+            "REGA, the Catalan livestock holdings register: farms with their species and "
+            "the number of animals each is licensed to keep."),
+        used_for=(
+            "Livestock cannot self-evacuate and moving them takes vehicles and hours of "
+            "notice, so a farm's position and herd size change the shape of an "
+            "evacuation. Registered capacity is a licensed maximum, not a census — "
+            "Catalonia-wide it totals roughly four times the animals actually present, so "
+            "treat it as an upper bound."),
         name="Registre d'explotacions ramaderes (REGA)",
         publisher="Departament d'Agricultura, Ramaderia, Pesca i Alimentacio",
         tier="resident", coverage="Catalonia", country="ES",
@@ -557,6 +607,13 @@ class CatLivestock(Connector):
 class CatMunicipalPoints(Connector):
     meta = SourceMeta(
         id="es.cat.munipoints",
+        description=(
+            "The ICGC's municipal reference points: an official coordinate for the centre "
+            "of every Catalan municipality."),
+        used_for=(
+            "A surveyed fallback position for Catalan records whose own coordinates are "
+            "missing or unusable, and a sanity check on names coming from other "
+            "registries."),
         name="Punts de referencia municipals",
         publisher="Institut Cartografic i Geologic de Catalunya (ICGC)",
         tier="resident", coverage="Catalonia", country="ES",

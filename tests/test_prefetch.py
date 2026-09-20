@@ -320,3 +320,58 @@ def test_diagnostics_reports_without_a_credential(store):
     blob = repr(r).lower()
     for secret in ("talaia_sk_", "admin", "password", "api_key", "authorization"):
         assert secret not in blob, f"diagnostics leaked {secret!r}"
+
+
+# ---------------------------------------------------------------------------
+# Offline geocoding, and saying so.
+# ---------------------------------------------------------------------------
+def test_every_source_explains_itself():
+    """The sources page is the only place a reader finds out what a number means."""
+    from talaia.connectors import registry
+
+    registry.load_all()
+    for cls in registry.all_connectors():
+        m = cls.meta
+        assert len(m.description) > 60, f"{m.id} has no real description"
+        assert len(m.used_for) > 60, f"{m.id} does not say how TALAIA uses it"
+
+
+def test_sources_that_need_geocoding_say_the_positions_are_approximate():
+    """A point derived from a place name is a different kind of claim from a surveyed
+    one, and the difference decides whether a building is inside a fire perimeter."""
+    from talaia.connectors import registry
+    from talaia.connectors.es import catalunya, spain  # noqa: F401
+
+    registry.load_all()
+    needs = {"es.cat.reses", "es.meq.schools", "es.msan.hospitales", "es.msan.siap",
+             "es.csic.carehomes"}
+    by_id = {c.meta.id: c.meta for c in registry.all_connectors()}
+    for sid in needs:
+        note = by_id[sid].geocoding
+        assert note, f"{sid} is geocoded but does not say so"
+        assert "approximat" in note.lower() or "not the building" in note.lower() \
+            or "rather than the building" in note.lower(), \
+            f"{sid} does not admit the position is approximate"
+        assert "hybrid" in note, f"{sid} does not say how to get real positions"
+
+
+async def test_the_gazetteer_resolves_bilingual_and_article_suffixed_names():
+    """Spain names a lot of places twice, and the registries pick either one."""
+    from talaia.connectors.es import gazetteer
+
+    table = {"girona": (2.83, 41.98), "alacant": (-0.48, 38.35),
+             "la seu d urgell": (1.46, 42.36)}
+    assert gazetteer.lookup(table, "Girona")
+    assert gazetteer.lookup(table, "Alicante/Alacant")
+    assert gazetteer.lookup(table, "Seu d'Urgell, la")
+    assert gazetteer.lookup(table, "Nowhere At All") is None
+
+
+async def test_an_offline_placement_is_flagged_as_approximate():
+    """Downstream has to be able to tell the two kinds of point apart."""
+    from talaia.connectors.es import gazetteer
+
+    hit = gazetteer.lookup({"girona": (2.83, 41.98)}, "Girona")
+    assert hit["approximate"] is True
+    assert hit["geocoder"] == "geonames-offline"
+    assert hit["quality"] <= 0.3, "a town centre must not outrank a street address"

@@ -199,8 +199,11 @@ function Keys({ notify }: { notify: (s: string) => void }) {
     setRowMsg(null);
     try {
       await adminRevokeKey(k.prefix);
-      notify(`Revoked ${k.prefix}`);
-      setRowMsg({ prefix: k.prefix, text: "Revoked", bad: false });
+      notify(`Revoked ${k.prefix} — the row is kept, marked revoked`);
+      // Otherwise the row silently disappears behind the "show revoked" filter, which
+      // looks exactly like a delete and makes the two buttons indistinguishable.
+      setShowRevoked(true);
+      setRowMsg({ prefix: k.prefix, text: "Revoked — key dead, record kept", bad: false });
       await load();
     } catch (e: any) {
       setError(e.message);
@@ -387,8 +390,13 @@ function Keys({ notify }: { notify: (s: string) => void }) {
       )}
 
       <Note>
-        A key defined in <code>TALAIA_API_KEYS</code> cannot be revoked here — it is not in
-        the database. Remove it from the environment and redeploy.
+        <strong>Revoke</strong> kills the key but keeps the row, marked revoked — so when
+        an integration starts returning <code>401</code> you can still see which key it
+        was and when. Tick “Show revoked” to list them. <strong>Delete</strong> removes
+        the key and its usage history outright, leaving no record it existed.
+        <br /><br />
+        A key defined in <code>TALAIA_API_KEYS</code> cannot be touched here — it is not
+        in the database. Remove it from the environment and redeploy.
       </Note>
     </div>
   );

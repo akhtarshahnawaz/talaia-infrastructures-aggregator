@@ -124,6 +124,16 @@ def _floors(tags: dict) -> float | None:
 class OpenStreetMap(Connector):
     meta = SourceMeta(
         id="osm",
+        description=(
+            "OpenStreetMap, queried live through Overpass for the area being asked about "
+            "and cached by tile. Contributed by volunteers rather than published by an "
+            "authority."),
+        used_for=(
+            "The registries publish points, not lines: no Spanish open register covers "
+            "roads or power distribution, so evacuation routes, power lines and the "
+            "linear features a fire actually crosses come from here. Completeness varies "
+            "by area and it carries no authority's guarantee, so it supplements the "
+            "registers and never overrides them."),
         name="OpenStreetMap",
         publisher="OpenStreetMap contributors",
         tier="on_demand", coverage="Global", country="*",
