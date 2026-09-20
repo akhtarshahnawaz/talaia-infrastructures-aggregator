@@ -71,6 +71,27 @@ def disk() -> dict[str, Any]:
     }
 
 
+def versions(store) -> dict[str, Any]:
+    """What is actually installed here.
+
+    ``duckdb>=1.1`` is not a version, it is a range, so the image can carry a different
+    engine from the one anything was tested against - which is exactly the shape of
+    "works on my machine, hangs in production".
+    """
+    import duckdb
+
+    out: dict[str, Any] = {"duckdb": getattr(duckdb, "__version__", "?")}
+    try:
+        rows = store.fetch_sync(
+            "SELECT extension_name, extension_version, installed, loaded "
+            "FROM duckdb_extensions() WHERE extension_name IN ('spatial', 'json')")
+        out["extensions"] = {r[0]: {"version": r[1], "installed": r[2], "loaded": r[3]}
+                             for r in rows}
+    except Exception as exc:  # pragma: no cover - defensive
+        out["extensions"] = {"error": str(exc)[:200]}
+    return out
+
+
 def duckdb_settings(store) -> dict[str, Any]:
     """What DuckDB thinks it may use - which is the thing that has to match the box."""
     wanted = ("memory_limit", "threads", "temp_directory", "max_temp_directory_size")
@@ -123,6 +144,7 @@ def report(store) -> dict[str, Any]:
             f"{limits['cpu_quota_cores']} of a core.")
     health = store.write_health()
     out = {"container": limits, "disk": disk(), "duckdb": d,
+           "versions": versions(store),
            "write_health": health, "notes": notes}
     # Only when something is actually stuck: it is cheap, but it is noise otherwise.
     if health.get("held_for_s", 0) > 10:
