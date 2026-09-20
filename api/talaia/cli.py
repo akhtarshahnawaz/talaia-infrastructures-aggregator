@@ -403,6 +403,12 @@ def main() -> int:
     pr.set_defaults(fn=cmd_regions)
 
     pm = sub.add_parser("migrate", help="copy a DuckDB store into Postgres")
+    # --db is a global flag, so `talaia --db X migrate` is the documented form. Accept
+    # `talaia migrate --db X` too: it is the order people actually type, and this is a
+    # command someone runs once, under pressure, from a doc. SUPPRESS is what stops the
+    # subparser's default from overwriting a value the global flag already set.
+    pm.add_argument("--db", default=argparse.SUPPRESS,
+                    help="path to the DuckDB file to read")
     pm.add_argument("--to", default=None,
                     help="destination DSN (default: TALAIA_DATABASE_URL)")
     pm.add_argument("--batch", type=int, default=5000,

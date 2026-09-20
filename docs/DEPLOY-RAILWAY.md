@@ -683,8 +683,11 @@ grid. It upserts on the primary key, so it is safe to re-run and safe to interru
    ```bash
    railway ssh --service <your-api-service>
    # then, at the container's shell:
-   python -m talaia migrate --db /data/talaia.duckdb
+   python -m talaia --db /data/talaia.duckdb migrate
    ```
+
+   > `--db` is a global flag, so it goes **before** `migrate`, not after. Putting it
+   > after gives `unrecognized arguments: --db`.
 
    `--to` is not needed: inside the container `TALAIA_DATABASE_URL` is already set, and
    the migration uses it. It prints a row count per table when it finishes:
