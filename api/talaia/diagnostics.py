@@ -92,6 +92,22 @@ def versions(store) -> dict[str, Any]:
     return out
 
 
+def dependencies() -> dict[str, Any]:
+    """Which optional readers are actually present in this image.
+
+    xlrd reads the legacy .xls the national school registry exports, and nothing else
+    does. Undeclared once already, it failed only in the container - so whether it is
+    here is worth being able to answer without redeploying to find out.
+    """
+    import importlib.util
+
+    out = {}
+    for module in ("xlrd", "openpyxl", "pandas", "shapely", "talaia_core"):
+        spec = importlib.util.find_spec(module)
+        out[module] = spec is not None
+    return out
+
+
 def duckdb_settings(store) -> dict[str, Any]:
     """What DuckDB thinks it may use - which is the thing that has to match the box."""
     wanted = ("memory_limit", "threads", "temp_directory", "max_temp_directory_size")
@@ -144,7 +160,7 @@ def report(store) -> dict[str, Any]:
             f"{limits['cpu_quota_cores']} of a core.")
     health = store.write_health()
     out = {"container": limits, "disk": disk(), "duckdb": d,
-           "versions": versions(store),
+           "versions": versions(store), "dependencies": dependencies(),
            "write_health": health, "notes": notes}
     # Only when something is actually stuck: it is cheap, but it is noise otherwise.
     if health.get("held_for_s", 0) > 10:

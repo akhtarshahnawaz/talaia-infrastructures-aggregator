@@ -149,6 +149,17 @@ class Settings(BaseSettings):
     # answer rather than a hung request.
     write_lock_timeout_s: float = 25.0
 
+    # Automatic recovery from a wedged write. A write that has made no progress for
+    # `write_stuck_after_s` gets its query interrupted, which frees the single writer
+    # and lets the service carry on. If interrupting does not work either - the thread
+    # is blocked somewhere Python cannot reach - the process exits after
+    # `write_fatal_after_s` so the platform restarts it, because a service that cannot
+    # write is not serving and a restart is what a human would do anyway.
+    write_watchdog_interval_s: float = 10.0
+    write_stuck_after_s: float = 90.0
+    write_fatal_after_s: float = 420.0
+    write_watchdog_may_exit: bool = True
+
     # --- server ----------------------------------------------------------
     cors_origins: str = "*"
     web_dist: Path = REPO_ROOT / "web" / "dist"

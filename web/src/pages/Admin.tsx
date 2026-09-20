@@ -5,6 +5,7 @@ import {
   adminDeleteKey, adminListKeys, adminPlaces, adminPrefetchStart,
   adminPrefetchStatus,
   adminPrefetchStop, adminRevokeByEmail, adminRevokeKey, adminSignups,
+  adminUnstick,
   adminUpdateKey,
   adminUsage, adminWarmStart, adminWarmStatus, adminWarmStop, getAdminKey, getCoverage,
   getRegions, getStats, getTiers, num, setAdminKey, type AdminKey,
@@ -696,6 +697,14 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
     catch (e: any) { setError(e.message); }
   };
 
+  const unstick = async () => {
+    try {
+      const r = await adminUnstick();
+      notify(`Cancelled ${r.cancelled} running quer${r.cancelled === 1 ? "y" : "ies"}`);
+      await load();
+    } catch (e: any) { setError(e.message); }
+  };
+
   const run = data?.run;
   const sources: any[] = data?.sources ?? [];
   const loaded = sources.filter((s) => s.rows > 0).length;
@@ -737,8 +746,12 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
           <strong>The database is not accepting writes.</strong>{" "}
           <code>{data.write_health.holder}</code> has held the single writer for{" "}
           {Math.round(data.write_health.held_for_s)}s, so loading a dataset, warming the
-          cache and revoking a key will all be refused until it lets go. Restarting the
-          service clears it.
+          cache and revoking a key are all being refused. The watchdog cancels it
+          automatically after {"\u2248"}90s and restarts the service if that does not
+          work — or clear it now:
+          <div className="mt-2">
+            <button className={btnDanger} onClick={unstick}>Cancel it now</button>
+          </div>
         </Note>
       )}
 

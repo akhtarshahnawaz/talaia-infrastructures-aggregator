@@ -274,6 +274,13 @@ class Connector(ABC):
             log.info("%s: ingested %s rows (%s geocoded, %s skipped for bad geometry, "
                      "%s outside %s, %s filtered out)", self.meta.id, total, geocoded,
                      skipped, out_of_coverage, self.coverage.label, filtered)
+            # Fold the write-ahead log in now, while nothing is waiting. Left to grow it
+            # gets checkpointed in the middle of some later insert instead, turning a
+            # small write into a long one at the worst possible moment.
+            try:
+                await store.checkpoint_now()
+            except Exception as exc:  # pragma: no cover - never fail an ingest for this
+                log.warning("%s: checkpoint after ingest failed: %s", self.meta.id, exc)
             return total
         except Exception as exc:
             await store.record_run(self.meta.id, "error", total, started, str(exc)[:500])

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -133,6 +134,54 @@ async def _bootstrap(store, connectors=None) -> None:
     log.info("bootstrap complete: %s", await store.stats())
 
 
+async def _write_watchdog(store) -> None:
+    """Notice a write that has stopped, and get the service out of it without a human.
+
+    DuckDB takes one writer. When a write stops making progress every later write queues
+    behind it forever, which is the difference between "slow" and "none of the buttons
+    do anything". Twice now that has needed a person to notice and a volume to be wiped.
+
+    Two escalations, in order:
+
+    1. Interrupt the running query. The blocked thread raises, ``_writing`` releases the
+       lock in its ``finally``, and everything behind it drains. This is almost always
+       enough and costs only the one write, which the ingest re-runs anyway.
+    2. Exit, and let the platform restart us. Only if interrupting did not help for
+       several minutes - at that point the process is not serving writes at all and a
+       restart is exactly what a person would do.
+    """
+    interrupted_at: float | None = None
+    while True:
+        await asyncio.sleep(settings.write_watchdog_interval_s)
+        try:
+            health = store.write_health()
+        except Exception:  # pragma: no cover - defensive
+            continue
+        held = float(health.get("held_for_s") or 0.0)
+        if held < settings.write_stuck_after_s:
+            interrupted_at = None
+            continue
+
+        if interrupted_at is None:
+            n = await asyncio.to_thread(store.interrupt_live_queries)
+            interrupted_at = time.monotonic()
+            log.error(
+                "write watchdog: %r has held the writer for %.0fs; interrupted %d "
+                "running quer%s to free it", health.get("holder"), held, n,
+                "y" if n == 1 else "ies")
+            continue
+
+        if (held >= settings.write_fatal_after_s
+                and settings.write_watchdog_may_exit):
+            log.critical(
+                "write watchdog: %r still wedged %.0fs after being interrupted. The "
+                "process cannot write and cannot recover in place; exiting so the "
+                "platform restarts it.", health.get("holder"), held)
+            # os._exit, not sys.exit: the point is to go now, without waiting on the
+            # very shutdown machinery that would have to take the lock we cannot get.
+            os._exit(70)
+
+
 async def _warm_on_boot(store) -> None:
     """Pre-load the tile cache for the regions named in TALAIA_WARM_ON_BOOT.
 
@@ -199,7 +248,9 @@ async def lifespan(app: FastAPI):
     if settings.warm_on_boot_list:
         await _warm_on_boot(store)
     flusher = asyncio.create_task(_flush_usage_loop(store))
+    watchdog = asyncio.create_task(_write_watchdog(store))
     yield
+    watchdog.cancel()
     flusher.cancel()
     from .services.warm import warmer
     await warmer.cancel()

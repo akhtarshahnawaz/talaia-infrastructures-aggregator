@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -82,6 +83,12 @@ class Store:
         self._con: duckdb.DuckDBPyConnection | None = None
         self._write_lock = asyncio.Lock()
         self._density_cache: float | None = None
+        # Live cursors, so a statement that has stopped making progress can be
+        # cancelled from outside the thread that is blocked in it. A thread stuck in
+        # DuckDB's C code cannot be killed from Python; interrupting its query can.
+        self._cursors: set = set()
+        self._cursors_lock = threading.Lock()
+        self._interrupts = 0
         # Write health, for the admin panel and the logs.
         self._write_holder: str | None = None
         self._write_since: float | None = None
@@ -111,6 +118,42 @@ class Store:
             self._write_holder, self._write_since = None, None
             self._write_lock.release()
 
+    def interrupt_live_queries(self) -> int:
+        """Cancel whatever is running, so a wedged write releases the single writer.
+
+        Interrupting is indiscriminate - a concurrent read dies too - but this only runs
+        when writes have already stopped for minutes, at which point a failed read is by
+        far the lesser loss. The interrupted statement raises in its own thread, the
+        ``finally`` in ``_writing`` releases the lock, and the service recovers without
+        anyone restarting anything.
+        """
+        with self._cursors_lock:
+            live = list(self._cursors)
+        cancelled = 0
+        for cur in live:
+            try:
+                cur.interrupt()
+                cancelled += 1
+            except Exception as exc:  # pragma: no cover - best effort by nature
+                log.debug("interrupt failed on a cursor: %s", exc)
+        self._interrupts += cancelled
+        return cancelled
+
+    def checkpoint(self) -> None:
+        """Fold the write-ahead log into the database file.
+
+        Left alone the WAL grows until DuckDB decides to checkpoint mid-write, which
+        turns an ordinary small insert into a long one at an unpredictable moment.
+        Doing it deliberately between ingests keeps that cost bounded and visible.
+        """
+        with self.cursor() as cur:
+            cur.execute("CHECKPOINT")
+
+    async def checkpoint_now(self) -> None:
+        """Checkpoint under the writer lock, since it needs exclusive access."""
+        async with self._writing("checkpoint"):
+            await asyncio.to_thread(self.checkpoint)
+
     def write_health(self) -> dict[str, Any]:
         return {
             "blocked": self._write_since is not None
@@ -120,6 +163,7 @@ class Store:
             if self._write_since else 0.0,
             "last_write_ok": self._last_write_ok.isoformat() if self._last_write_ok else None,
             "writes_refused": self._writes_blocked,
+            "queries_interrupted": self._interrupts,
         }
 
     # -- lifecycle ---------------------------------------------------------
@@ -240,10 +284,14 @@ class Store:
         if self._con is None:
             raise RuntimeError("Store.connect() has not been called")
         cur = self._con.cursor()
+        with self._cursors_lock:
+            self._cursors.add(cur)
         try:
             cur.execute("LOAD spatial;")
             yield cur
         finally:
+            with self._cursors_lock:
+                self._cursors.discard(cur)
             cur.close()
 
     # -- generic helpers ---------------------------------------------------

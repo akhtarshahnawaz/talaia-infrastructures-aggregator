@@ -280,10 +280,27 @@ If you only need one area, filtering by place avoids the question entirely.
 `GET /v1/admin/prefetch` also reports `write_health` and `boot_bootstrap`.
 
 `write_health` matters because DuckDB takes a single writer: if something stops making
-progress while holding it, every later write queues behind it. Writes now give up after
+progress while holding it, every later write queues behind it. Writes give up after
 `TALAIA_WRITE_LOCK_TIMEOUT_S` (25s) and return `503` naming the holder, rather than
 hanging forever — the failure mode where reads answer in milliseconds, every button in
 the admin panel appears to do nothing, and nothing is logged because nothing has failed.
+
+**It recovers on its own.** A thread blocked inside DuckDB cannot be killed from Python,
+but its query can be interrupted, which makes it raise and release the lock. A watchdog
+does exactly that:
+
+| After | What happens |
+|---|---|
+| `TALAIA_WRITE_STUCK_AFTER_S` (90s) | The running query is interrupted. The wedged write fails, the queue drains, the ingest re-runs that chunk. |
+| `TALAIA_WRITE_FATAL_AFTER_S` (420s) | If it is still wedged, the process exits and the platform restarts it. Disable with `TALAIA_WRITE_WATCHDOG_MAY_EXIT=false`. |
+
+`POST /v1/admin/unstick` does the first step by hand, and the admin panel shows a
+**Cancel it now** button whenever writes are blocked. Neither needs the volume wiped.
+
+Every ingest also checkpoints when it finishes, folding the write-ahead log into the
+database file while nothing is waiting — left to grow, the WAL gets checkpointed in the
+middle of some later insert instead, which turns a small write into a long one at the
+worst possible moment.
 
 `boot_bootstrap` is what became of the background load started at boot. It runs detached, so if it dies its traceback goes to the log and
 It runs detached, so if it dies its traceback goes to the log and nothing else notices —

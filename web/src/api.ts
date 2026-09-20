@@ -210,6 +210,8 @@ export const adminRevokeByEmail = (email: string) =>
 
 export const adminPrefetchStatus = () => admin<any>("/v1/admin/prefetch");
 export const adminPlaces = () => admin<any>("/v1/admin/places");
+export const adminUnstick = () =>
+  admin<any>("/v1/admin/unstick", { method: "POST" });
 export const adminPrefetchStart = (body: Record<string, any>) =>
   admin<any>("/v1/admin/prefetch", { method: "POST", body: JSON.stringify(body) });
 export const adminPrefetchStop = () =>

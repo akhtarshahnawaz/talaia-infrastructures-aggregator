@@ -13,6 +13,7 @@ Endpoints fall into three access classes:
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import re
 import secrets
@@ -855,6 +856,22 @@ async def diagnostics() -> dict[str, Any]:
     from ..diagnostics import report
 
     return report(get_store())
+
+
+@admin_router.post("/unstick", summary="Cancel whatever is holding the database writer")
+async def unstick() -> dict[str, Any]:
+    """Free the single writer by hand, without restarting anything.
+
+    The watchdog does this on its own after a couple of minutes; this is the same lever
+    for someone who is watching and does not want to wait. It cancels every running
+    query, so an unlucky read fails too - which only matters if writes were fine, and if
+    writes were fine you would not be pressing it.
+    """
+    store = get_store()
+    before = store.write_health()
+    cancelled = await asyncio.to_thread(store.interrupt_live_queries)
+    await asyncio.sleep(0.5)
+    return {"cancelled": cancelled, "was": before, "now": store.write_health()}
 
 
 @admin_router.get("/places", summary="Place names the prefetch filter will match")
