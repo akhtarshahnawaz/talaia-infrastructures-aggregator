@@ -7,9 +7,16 @@ the next five minutes, or who is looking at a source that failed and wants to re
 without restarting the container.
 
 So: the same ingest, startable per source from the admin panel, narrowed by a place or a
-record count. One run at a time, because DuckDB takes a single writer and the ingest is
-already internally concurrent - a second run would contend for the same lock and the same
-geocoder without finishing anything sooner.
+record count. One *run* at a time, because two operators starting overlapping loads of
+the same sources is confusing rather than fast - but within a run, several sources load
+at once on a backend that takes concurrent writers.
+
+How many at once is a question about the upstreams, not about us. Each connector is
+already internally concurrent, and the registries and geocoders they read are public
+services run by other people; TALAIA_INGEST_CONCURRENCY is the knob, and it is
+deliberately a small number. On the DuckDB backend it is forced to 1, because there the
+sources would serialise behind the single writer anyway and pretending otherwise would
+only pile up half-finished work.
 """
 from __future__ import annotations
 
@@ -19,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from ..config import settings
 from ..connectors import registry
 from ..connectors.base import IngestFilter, Tier
 from ..norm import fold
@@ -165,12 +173,27 @@ class Prefetcher:
             pass
         return True
 
+    @staticmethod
+    def _lanes(store) -> int:
+        """How many sources may load at once against this store."""
+        if getattr(store, "backend", "duckdb") == "duckdb":
+            return 1
+        return max(1, settings.ingest_concurrency)
+
     async def _run(self, store, connectors: list, select: IngestFilter,
                    progress: PrefetchProgress) -> None:
-        try:
-            for entry, cls in zip(progress.sources, connectors):
-                progress.current = entry.source_id
+        lanes = self._lanes(store)
+        semaphore = asyncio.Semaphore(lanes)
+        in_flight: set[str] = set()
+
+        def restate() -> None:
+            progress.current = ", ".join(sorted(in_flight)) or None
+
+        async def one(entry: SourceProgress, cls) -> None:
+            async with semaphore:
                 entry.status = "running"
+                in_flight.add(entry.source_id)
+                restate()
                 try:
                     entry.rows = await cls().ingest(store, select=select)
                     entry.status = "partial" if select.is_partial else "ok"
@@ -184,6 +207,18 @@ class Prefetcher:
                     entry.status = "failed"
                     entry.error = f"{type(exc).__name__}: {exc}"[:300]
                     log.exception("prefetch: %s failed", entry.source_id)
+                finally:
+                    in_flight.discard(entry.source_id)
+                    restate()
+
+        try:
+            log.info("prefetch: %d source(s), %d at a time", len(connectors), lanes)
+            # return_exceptions, so one source raising something the handler above did
+            # not catch cannot abandon the others mid-flight with no status recorded.
+            await asyncio.gather(
+                *(one(entry, cls)
+                  for entry, cls in zip(progress.sources, connectors)),
+                return_exceptions=False)
             progress.status = progress.settle()
         except asyncio.CancelledError:
             progress.status = "cancelled"

@@ -82,6 +82,15 @@ def versions(store) -> dict[str, Any]:
 
     out: dict[str, Any] = {"duckdb": getattr(duckdb, "__version__", "?")}
     try:
+        import psycopg
+        out["psycopg"] = getattr(psycopg, "__version__", "?")
+    except ImportError:  # pragma: no cover - the driver ships in the image
+        pass
+    if getattr(store, "backend", "duckdb") != "duckdb":
+        # DuckDB is installed but is not what is answering queries, so asking it about
+        # its extensions would describe an engine nothing is using.
+        return out
+    try:
         rows = store.fetch_sync(
             "SELECT extension_name, extension_version, installed, loaded "
             "FROM duckdb_extensions() WHERE extension_name IN ('spatial', 'json')")
@@ -145,21 +154,69 @@ def thread_stacks(limit: int = 12) -> list[dict[str, Any]]:
     return out
 
 
+def postgres_status(store) -> dict[str, Any]:
+    """What the server is and what it is currently doing.
+
+    The counts matter more than they look. `active` versus `idle in transaction` is the
+    difference between a database doing work and a client that opened a transaction and
+    wandered off, and `longest_s` is the number that would have shown, in one line, that
+    a bulk write had stopped making progress.
+    """
+    out: dict[str, Any] = {}
+    try:
+        rows = store.fetch_sync("SELECT version(), postgis_version()")
+        out["server"] = rows[0][0].split(" on ")[0] if rows else None
+        out["postgis"] = rows[0][1] if rows else None
+    except Exception as exc:  # pragma: no cover - defensive
+        out["error"] = str(exc)[:200]
+    try:
+        rows = store.fetch_sync(
+            "SELECT state, count(*), "
+            "       coalesce(max(extract(epoch FROM now() - query_start)), 0) "
+            "FROM pg_stat_activity WHERE datname = current_database() "
+            "GROUP BY state")
+        out["activity"] = {
+            (state or "unknown"): {"connections": n, "longest_s": round(float(secs), 1)}
+            for state, n, secs in rows}
+    except Exception as exc:  # pragma: no cover - defensive
+        out["activity"] = {"error": str(exc)[:200]}
+    return out
+
+
 def report(store) -> dict[str, Any]:
     limits = container_limits()
-    d = duckdb_settings(store)
+    backend = getattr(store, "backend", "duckdb")
     notes: list[str] = []
-    # The comparison that matters: DuckDB will happily use what it was told it may use.
-    if limits.get("memory_limit_mb") and isinstance(d.get("memory_limit"), str):
+
+    if backend == "postgres":
+        d: dict[str, Any] = {"backend": "postgres"}
+        database = postgres_status(store)
         notes.append(
-            f"DuckDB is allowed {d['memory_limit']} on a container limited to "
-            f"{limits['memory_limit_mb']}MB.")
-    if limits.get("cpu_quota_cores") and d.get("threads"):
+            "Storage backend is Postgres, so writes are not serialised behind a single "
+            "writer and a stalled ingest cannot block API key or signup writes.")
+        if not database.get("postgis"):
+            notes.append(
+                "PostGIS did not report a version. Spatial queries need it; check that "
+                "the database is the PostGIS image and not plain Postgres.")
+    else:
+        d = duckdb_settings(store)
+        database = {"backend": "duckdb"}
+        # The comparison that matters: DuckDB will happily use what it was told it may use.
+        if limits.get("memory_limit_mb") and isinstance(d.get("memory_limit"), str):
+            notes.append(
+                f"DuckDB is allowed {d['memory_limit']} on a container limited to "
+                f"{limits['memory_limit_mb']}MB.")
+        if limits.get("cpu_quota_cores") and d.get("threads"):
+            notes.append(
+                f"DuckDB is using {d['threads']} threads on "
+                f"{limits['cpu_quota_cores']} of a core.")
         notes.append(
-            f"DuckDB is using {d['threads']} threads on "
-            f"{limits['cpu_quota_cores']} of a core.")
+            "Storage backend is the embedded DuckDB file, which takes one writer at a "
+            "time. Set TALAIA_DATABASE_URL to run on Postgres instead.")
+
     health = store.write_health()
-    out = {"container": limits, "disk": disk(), "duckdb": d,
+    out = {"container": limits, "disk": disk(), "backend": backend,
+           "duckdb": d, "database": database,
            "versions": versions(store), "dependencies": dependencies(),
            "write_health": health, "notes": notes}
     # Only when something is actually stuck: it is cheap, but it is noise otherwise.

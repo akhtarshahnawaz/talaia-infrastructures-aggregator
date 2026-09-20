@@ -53,7 +53,8 @@ COPY pyproject.toml ./
 RUN pip install \
       "fastapi>=0.115" "uvicorn[standard]>=0.32" "httpx>=0.28" "duckdb>=1.1" \
       "shapely>=2.0" "pydantic>=2.9" "pydantic-settings>=2.6" "numpy>=1.26" \
-      "orjson>=3.10" "rapidfuzz>=3.10" "openpyxl" "pandas" "xlrd>=2.0"
+      "orjson>=3.10" "rapidfuzz>=3.10" "openpyxl" "pandas" "xlrd>=2.0" \
+      "psycopg[binary]>=3.2" "psycopg-pool>=3.2"
 
 # Install the Rust wheel when stage 1 produced one.
 COPY --from=rust-builder /build/wheels/ /tmp/wheels/

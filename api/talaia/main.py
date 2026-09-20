@@ -24,7 +24,7 @@ from .auth import apply_tier_overrides, registry as key_registry
 from .mcp import mcp_router
 from .routers.v1 import (admin_router, meta_router, public_router,
                          router as v1_router)
-from .store import Store, StoreBusy, get_store, set_store
+from .store import Store, StoreBusy, create_store, get_store, set_store
 
 logging.basicConfig(level=logging.INFO,
                     format="%(levelname)-7s %(name)-22s %(message)s")
@@ -150,6 +150,16 @@ async def _write_watchdog(store) -> None:
        several minutes - at that point the process is not serving writes at all and a
        restart is exactly what a person would do.
     """
+    if getattr(store, "backend", "duckdb") != "duckdb":
+        # Nothing to watch. The escalation below exists because DuckDB's single writer
+        # can be held indefinitely by one stalled statement, taking every other write
+        # with it. Postgres has no such shared chokepoint - a stalled statement blocks
+        # only itself, and statement_timeout ends it server-side - so a watchdog that
+        # can restart the process would be all risk and no benefit.
+        log.info("write watchdog not started: the %s backend has no single writer",
+                 store.backend)
+        return
+
     interrupted_at: float | None = None
     while True:
         await asyncio.sleep(settings.write_watchdog_interval_s)
@@ -207,9 +217,10 @@ async def lifespan(app: FastAPI):
     changed = apply_tier_overrides()
     if changed:
         log.info("tier limits overridden from the environment: %s", ", ".join(changed))
-    store = Store()
+    store = create_store()
     store.connect()
     set_store(store)
+    log.info("storage backend: %s", store.backend)
     await key_registry.load(store)
     if settings.require_auth:
         log.info("authentication ENABLED - %d key(s) active", len(key_registry))
@@ -256,7 +267,10 @@ async def lifespan(app: FastAPI):
     await warmer.cancel()
     await key_registry.flush_usage(store)
     await close_client()
-    store.close()
+    if hasattr(store, "aclose"):
+        await store.aclose()   # Postgres: wait for the pool to drain
+    else:
+        store.close()
 
 
 app = FastAPI(

@@ -748,7 +748,8 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
           {Math.round(data.write_health.held_for_s)}s, so loading a dataset, warming the
           cache and revoking a key are all being refused. The watchdog cancels it
           automatically after {"\u2248"}90s and restarts the service if that does not
-          work — or clear it now:
+          work — or clear it now. This cannot happen on the Postgres backend, which has
+          no single writer; see <code>docs/DEPLOY-RAILWAY.md</code>.
           <div className="mt-2">
             <button className={btnDanger} onClick={unstick}>Cancel it now</button>
           </div>
@@ -835,8 +836,15 @@ function Prefetch({ notify }: { notify: (s: string) => void }) {
 
       <Note>
         A filtered load is recorded as <code>partial</code>, never complete, so the
-        source is still picked up in full the next time the service boots. One load runs
-        at a time — DuckDB takes a single writer.
+        source is still picked up in full the next time the service boots.{" "}
+        {data?.write_health?.backend === "postgres" ? (
+          <>Several sources load at once; one run at a time, so a second load waits for
+          this one to finish.</>
+        ) : (
+          <>One source loads at a time, because the DuckDB backend takes a single writer.
+          Set <code>TALAIA_DATABASE_URL</code> to run on Postgres and load them in
+          parallel.</>
+        )}
       </Note>
     </div>
   );

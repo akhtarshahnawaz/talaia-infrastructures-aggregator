@@ -125,7 +125,8 @@ that key alone and pin it against future tier changes.
 
 ### c. CLI — while the service is stopped
 
-DuckDB takes one writer, and the API holds it. Stop the service first.
+On the DuckDB backend the API holds the single writer, so stop the service first. On
+Postgres the CLI can run against a live service.
 
 ```bash
 python -m talaia key create --tier unlimited --label deepfire-integration
@@ -233,7 +234,7 @@ checking the unbuffered shape would be an obvious way through.
 asking for 10 still gets 10.
 
 Quotas are counted in memory and flushed to disk every 60 seconds, because a database
-write per request would funnel the whole service through DuckDB's single writer. They are
+write per request would mean a hot row per key on every single call. They are
 restored on boot, so a restart does not hand everyone a fresh allowance. The cost of that
 design is that up to 60 seconds of counts can be lost in a hard crash.
 

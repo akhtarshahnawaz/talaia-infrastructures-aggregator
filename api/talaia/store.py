@@ -78,6 +78,8 @@ class StoreBusy(RuntimeError):
 
 
 class Store:
+    backend = "duckdb"
+
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path) if db_path else settings.db_path
         self._con: duckdb.DuckDBPyConnection | None = None
@@ -579,6 +581,14 @@ class Store:
         return await asyncio.to_thread(
             self._query_assets, wkt, bbox, categories, limit, sources, strategy)
 
+    # ST_FlipCoordinates is not decoration. DuckDB's spatial extension reads the
+    # spheroid functions' arguments as (latitude, longitude), while everything else in
+    # this schema - and every source it is loaded from - is (longitude, latitude). Left
+    # unflipped, ST_Length_Spheroid measures a degree of longitude as though it were a
+    # degree of latitude, so it ignores the cosine of the latitude entirely: an
+    # east-west road in Catalonia came back 33% longer than it is, and that number is
+    # multiplied by a cost per kilometre in the exposure report. Verified against
+    # PostGIS, which agrees to the metre once the coordinates are the right way round.
     def _query_networks(self, wkt: str, bbox: tuple[float, float, float, float],
                         subcategories: Sequence[str] | None,
                         limit: int) -> list[dict]:
@@ -593,7 +603,9 @@ class Store:
         sql = f"""
             SELECT id, source_id, category, subcategory, name,
                    ST_AsGeoJSON(ST_Intersection(geom, ST_GeomFromText(?))) AS geojson,
-                   ST_Length_Spheroid(ST_Intersection(geom, ST_GeomFromText(?))) AS clipped_m,
+                   ST_Length_Spheroid(
+                     ST_FlipCoordinates(ST_Intersection(geom, ST_GeomFromText(?))))
+                     AS clipped_m,
                    attributes
             FROM networks WHERE {' AND '.join(where)} LIMIT {int(limit)}
         """
@@ -611,8 +623,9 @@ class Store:
         """Area-weighted census population: each cell contributes its overlap fraction."""
         sql = """
             SELECT cell_id, population, area_m2,
-                   ST_Area_Spheroid(ST_Intersection(geom, ST_GeomFromText(?)))
-                     / NULLIF(ST_Area_Spheroid(geom), 0) AS frac,
+                   ST_Area_Spheroid(
+                     ST_FlipCoordinates(ST_Intersection(geom, ST_GeomFromText(?))))
+                     / NULLIF(ST_Area_Spheroid(ST_FlipCoordinates(geom)), 0) AS frac,
                    ST_X(ST_Centroid(geom)) AS lon,
                    ST_Y(ST_Centroid(geom)) AS lat,
                    ST_AsGeoJSON(geom) AS geojson
@@ -866,17 +879,31 @@ class Store:
         return result
 
 
-_store: Store | None = None
+_store: Any = None
 
 
-def get_store() -> Store:
+def create_store() -> Any:
+    """Build whichever backend the environment asks for, unconnected.
+
+    One line decides it: with TALAIA_DATABASE_URL (or Railway's DATABASE_URL) set, the
+    store is Postgres and writes run concurrently; without it, the store is this
+    DuckDB file and writes take turns. Both satisfy the same interface, so nothing
+    above this function needs to know which one it got.
+    """
+    if settings.uses_postgres:
+        from .pgstore import PostgresStore
+        return PostgresStore()
+    return Store()
+
+
+def get_store() -> Any:
     global _store
     if _store is None:
-        _store = Store()
+        _store = create_store()
         _store.connect()
     return _store
 
 
-def set_store(store: Store) -> None:
+def set_store(store: Any) -> None:
     global _store
     _store = store

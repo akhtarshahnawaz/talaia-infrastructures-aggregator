@@ -15,7 +15,8 @@ if __name__ == "__main__":  # allow `python api/talaia/cli.py` as well as `-m ta
 from talaia.connectors import registry  # noqa: E402
 from talaia.connectors.base import Tier  # noqa: E402
 from talaia.net import close_client  # noqa: E402
-from talaia.store import Store, set_store  # noqa: E402
+from talaia.store import (ASSET_COLUMNS, NETWORK_COLUMNS, Store,  # noqa: E402
+                          set_store)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)-22s %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -248,6 +249,115 @@ async def cmd_key(args) -> int:
     return 0
 
 
+# Tables copied by `migrate`, in an order that does not matter - there are no foreign
+# keys - but is written newest-value-first so an interrupted run leaves the useful
+# things behind. Geometry tables are handled separately because they need WKT.
+_PLAIN_TABLES = [
+    ("api_keys", "key_hash, prefix, label, tier, rate_limit_per_min, daily_quota, "
+                 "max_aoi_km2, max_assets, custom_limits, email, organisation, "
+                 "created_ip, created_at, revoked_at, last_used_at, request_count, "
+                 "email_verified"),
+    ("key_usage", "key_hash, day, requests"),
+    ("pending_signups", "token_hash, email, organisation, use_case, ip, created_at, "
+                        "expires_at, consumed_at"),
+    ("signups", "id, email, organisation, ip, created_at, key_prefix"),
+    ("source_runs", "run_id, source_id, started_at, finished_at, status, rows, error"),
+    ("osm_tile_cache", "tile_key, min_lon, min_lat, max_lon, max_lat, fetched_at, "
+                       "status, feature_count, network_count, error, last_hit_at"),
+    ("enrichment_cache", "key, kind, payload, created_at"),
+]
+
+
+async def cmd_migrate(args) -> int:
+    """Copy a DuckDB store into Postgres.
+
+    The reason this exists rather than "just re-ingest": the DuckDB file holds things
+    that cannot be re-derived. Every API key your users are holding right now lives in
+    it, as do the signup records behind them and an enrichment cache that took an hour
+    of somebody else's geocoder to build. Re-ingesting would rebuild the assets and
+    silently invalidate every key in circulation.
+
+    Idempotent, because it upserts on the primary key: running it twice is harmless, and
+    running it again after a partial failure resumes rather than duplicates.
+    """
+    from talaia.config import settings
+    from talaia.pgstore import PostgresStore
+
+    dsn = args.to or settings.database_url
+    if not dsn:
+        log.error("no destination: pass --to postgresql://... or set TALAIA_DATABASE_URL")
+        return 2
+
+    src = Store(args.db) if args.db else Store()
+    src.connect()
+    dst = PostgresStore(dsn)
+    dst.connect()
+    log.info("migrating %s -> %s", src.db_path, dsn.rsplit("@", 1)[-1])
+
+    moved: dict[str, int] = {}
+    try:
+        for table, columns in _PLAIN_TABLES:
+            try:
+                rows = await src.fetch(f"SELECT {columns} FROM {table}")
+            except Exception as exc:
+                log.warning("skipping %s: %s", table, exc)
+                continue
+            if not rows:
+                moved[table] = 0
+                continue
+            names = [c.strip() for c in columns.replace("\n", " ").split(",")]
+            placeholders = ", ".join("?" for _ in names)
+            for row in rows:
+                await dst.execute_write(
+                    f"INSERT OR REPLACE INTO {table} ({', '.join(names)}) "
+                    f"VALUES ({placeholders})", list(row))
+            moved[table] = len(rows)
+            log.info("  %-18s %d rows", table, len(rows))
+
+        # Geometry tables: read WKT out of DuckDB, let Postgres rebuild the geometry.
+        # Batched, because these are the big ones and a row-at-a-time loop over 350k
+        # assets would take longer than the original ingest.
+        for table, upsert, cols in (
+            ("assets", dst.upsert_assets, ASSET_COLUMNS),
+            ("networks", dst.upsert_networks, NETWORK_COLUMNS),
+        ):
+            select = ", ".join("ST_AsText(geom) AS wkt" if c == "wkt" else c for c in cols)
+            total = (await src.fetch(f"SELECT count(*) FROM {table}"))[0][0]
+            done = 0
+            while done < total:
+                rows = await src.fetch(
+                    f"SELECT {select} FROM {table} ORDER BY id "
+                    f"LIMIT {args.batch} OFFSET {done}")
+                if not rows:
+                    break
+                await upsert([dict(zip(cols, r)) for r in rows])
+                done += len(rows)
+                log.info("  %-18s %d/%d", table, done, total)
+            moved[table] = done
+
+        total = (await src.fetch("SELECT count(*) FROM pop_grid"))[0][0]
+        done = 0
+        while done < total:
+            rows = await src.fetch(
+                "SELECT cell_id, ST_AsText(geom), population, area_m2, source_id, year "
+                f"FROM pop_grid ORDER BY cell_id LIMIT {args.batch} OFFSET {done}")
+            if not rows:
+                break
+            await dst.upsert_popgrid([
+                dict(zip(["cell_id", "wkt", "population", "area_m2", "source_id", "year"], r))
+                for r in rows])
+            done += len(rows)
+            log.info("  %-18s %d/%d", "pop_grid", done, total)
+        moved["pop_grid"] = done
+    finally:
+        src.close()
+        await dst.aclose()
+
+    log.info("migrated: %s", ", ".join(f"{k}={v}" for k, v in sorted(moved.items())))
+    print(json.dumps(moved, indent=2))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="talaia")
     p.add_argument("--db", help="path to the DuckDB file")
@@ -291,6 +401,13 @@ def main() -> int:
 
     pr = sub.add_parser("regions", help="list the regions warm understands")
     pr.set_defaults(fn=cmd_regions)
+
+    pm = sub.add_parser("migrate", help="copy a DuckDB store into Postgres")
+    pm.add_argument("--to", default=None,
+                    help="destination DSN (default: TALAIA_DATABASE_URL)")
+    pm.add_argument("--batch", type=int, default=5000,
+                    help="rows per batch for the geometry tables (default: 5000)")
+    pm.set_defaults(fn=cmd_migrate)
 
     pq = sub.add_parser("query", help="query a polygon")
     pq.add_argument("aoi", help="GeoJSON file path or inline GeoJSON")

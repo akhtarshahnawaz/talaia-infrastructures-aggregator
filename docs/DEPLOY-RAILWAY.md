@@ -1,8 +1,19 @@
 # Deploying TALAIA to Railway
 
 End state: one Railway service serving the API **and** the documentation website on a
-single HTTPS domain, with a persistent volume holding the DuckDB store, self-service
-signup enabled for the public, and an unlimited key for your own integration.
+single HTTPS domain, backed by a Postgres + PostGIS database, with self-service signup
+enabled for the public and an unlimited key for your own integration.
+
+> **Storage: use Postgres.** TALAIA can run on an embedded DuckDB file on a volume, and
+> that is still what local development and the tests use. Do not deploy it that way.
+> DuckDB accepts exactly one writer, so a single ingest that stops making progress holds
+> every other write in the process behind it — no new API keys, no revocations, no
+> signups, no tile-cache updates — until each request times out. The visible symptom is
+> that every button in the admin panel stops doing anything, and nothing is logged,
+> because from the database's point of view nothing has failed yet. Postgres has no such
+> chokepoint: several ingests, several people signing up and the tile cache all write at
+> the same time. Already running on a volume? See
+> [Migrating an existing deployment](#migrating-an-existing-deployment).
 
 Expect **15–20 minutes**, most of it waiting for the first build and data load.
 
@@ -17,8 +28,9 @@ Expect **15–20 minutes**, most of it waiting for the first build and data load
 |---|---|
 | A GitHub repo containing this project | Railway builds from a connected repo |
 | A Railway account | <https://railway.app> |
-| ~1 GB of volume | The store lands around 150 MB, plus a 60 MB cached download |
-| A service plan with ≥1 GB RAM | DuckDB is configured for a 1 GB memory limit |
+| A Postgres **with PostGIS** | TALAIA stores geometry; plain Postgres cannot. See step 3 |
+| ~1 GB of database storage | The store lands around 250 MB once every source is loaded |
+| A service plan with ≥1 GB RAM | The API itself; the database is sized separately |
 
 Two decisions to make now, because they shape the variables you set in step 3:
 
@@ -64,19 +76,36 @@ service rebuilds it on the volume at first boot.
 
 ---
 
-## 3. Add the volume — do this before the real first boot
-
-Service → **Variables / Settings → Volumes** → **New Volume**.
-
-| Setting | Value |
-|---|---|
-| Mount path | `/data` |
-| Size | 1 GB is comfortable |
+## 3. Add the database — do this before the real first boot
 
 This is the single most important step. Without it every redeploy starts from an empty
 store and re-ingests everything — including re-downloading the 60 MB population grid —
-and **every API key you or your users created is lost**, because keys live in the same
-DuckDB file.
+and **every API key you or your users created is lost**, because keys live in the store.
+
+### Add Postgres with PostGIS
+
+Railway's stock **Postgres** service does **not** include PostGIS, and TALAIA will refuse
+to start against it with a message saying so. Deploy a PostGIS template instead:
+
+1. Project → **New** → **Database** → search the template marketplace for **PostGIS**
+   (for example *PostGIS — Open-Source Spatial Database*, which runs `postgis/postgis`).
+2. Deploy it. Railway gives it its own volume and a `DATABASE_URL`.
+3. Leave it running. You will reference that variable from the API service in step 4.
+
+If you would rather use a Postgres you already have, anywhere, that is fine — TALAIA only
+needs a DSN it can reach and the `postgis` extension available. It runs
+`CREATE EXTENSION IF NOT EXISTS postgis` itself at boot, so the database user needs
+rights to do that once, or an administrator can create the extension ahead of time.
+
+### Do you still need a volume?
+
+No. With `TALAIA_DATABASE_URL` set, nothing durable is kept on local disk — the
+database holds the assets, the tile cache, the enrichment cache and the API keys, and
+Postgres has its own storage. A volume at `/data` is then only scratch space.
+
+Keep a volume only if you are deliberately running the DuckDB backend, in which case
+mount it at `/data`, size it at 1 GB, and read the warning at the top of this guide
+first.
 
 ---
 
@@ -87,10 +116,24 @@ Service → **Variables**. `PORT` is injected by Railway; do not set it.
 ### Required
 
 ```bash
-TALAIA_DATA_DIR=/data
 TALAIA_REQUIRE_AUTH=true
 TALAIA_ADMIN_KEY=<the secret you generated in step 0>
 ```
+
+And the database. In the API service's **Variables**, add a *variable reference* rather
+than pasting a connection string — Railway then keeps it correct if the database is ever
+recreated, and the password never sits in two places:
+
+```bash
+# Railway UI: New Variable -> Add Reference -> pick the PostGIS service -> DATABASE_URL
+TALAIA_DATABASE_URL=${{Postgres.DATABASE_URL}}
+```
+
+Substitute the PostGIS service's actual name for `Postgres` if you called it something
+else. The plain name `DATABASE_URL` is also accepted, so if Railway already injects one
+into this service you can leave it and set nothing — TALAIA reads either.
+
+Only set `TALAIA_DATA_DIR=/data` if you are running the DuckDB backend on a volume.
 
 ### Recommended
 
@@ -126,6 +169,16 @@ TALAIA_WARM_ON_BOOT=demo
 ### Optional
 
 ```bash
+# How many sources one prefetch run loads at once. Only honoured on Postgres; the
+# DuckDB backend forces 1. Kept small because each connector is already concurrent
+# against somebody else's public registry or geocoder.
+TALAIA_INGEST_CONCURRENCY=3
+
+# Connections per process. Keep replicas x this under the database's max_connections.
+TALAIA_PG_POOL_MAX=12
+# Postgres cancels any single statement running longer than this, server-side.
+TALAIA_PG_STATEMENT_TIMEOUT_S=300
+
 # Extra always-valid keys, "label:key" or bare "key", comma separated.
 # Useful for CI. Keys minted through the admin API do not need to appear here.
 TALAIA_API_KEYS=ci:talaia_sk_xxxxxxxxxxxxxxxx
@@ -206,8 +259,11 @@ addresses and ~51,000 school addresses through CartoCiudad, plus the 60 MB
 population-grid download. Queries answered before it finishes return OpenStreetMap-only
 results with a warning rather than failing — by design.
 
-Ingestion runs **inside the API process on purpose**: DuckDB allows one writer, so a
-separate ingest process would be locked out while the service holds the file.
+Ingestion runs **inside the API process**, and on Postgres several sources load at once
+rather than queueing. The API keeps answering throughout, and administrative writes —
+creating a key, a signup, revoking a key — are not held up by a load in progress. On the
+DuckDB backend they were, which is what made a slow ingest look like a broken admin
+panel.
 
 ### Redeploying during the bootstrap
 
@@ -279,28 +335,37 @@ If you only need one area, filtering by place avoids the question entirely.
 
 `GET /v1/admin/prefetch` also reports `write_health` and `boot_bootstrap`.
 
-`write_health` matters because DuckDB takes a single writer: if something stops making
-progress while holding it, every later write queues behind it. Writes give up after
-`TALAIA_WRITE_LOCK_TIMEOUT_S` (25s) and return `503` naming the holder, rather than
-hanging forever — the failure mode where reads answer in milliseconds, every button in
-the admin panel appears to do nothing, and nothing is logged because nothing has failed.
+Start with `GET /v1/diagnostics`, which needs no credential. `backend` tells you which
+engine is actually answering — check this first, because most of what follows depends on
+it:
 
-**It recovers on its own.** A thread blocked inside DuckDB cannot be killed from Python,
-but its query can be interrupted, which makes it raise and release the lock. A watchdog
-does exactly that:
+```bash
+curl -s $TALAIA/v1/diagnostics | python3 -m json.tool | head -40
+```
 
-| After | What happens |
+**On Postgres**, `write_health.blocked` is structurally `false`: there is no single
+writer to queue behind, so a slow or stuck ingest slows down that ingest and nothing
+else. `database.activity` breaks the connections down by state, and its `longest_s` is
+the number worth looking at — a statement that has been `active` for minutes is one
+statement in trouble, not an outage.
+
+Three things bound a bad statement, none of which need a person:
+
+| Guard | What it does |
 |---|---|
-| `TALAIA_WRITE_STUCK_AFTER_S` (90s) | The running query is interrupted. The wedged write fails, the queue drains, the ingest re-runs that chunk. |
-| `TALAIA_WRITE_FATAL_AFTER_S` (420s) | If it is still wedged, the process exits and the platform restarts it. Disable with `TALAIA_WRITE_WATCHDOG_MAY_EXIT=false`. |
+| `TALAIA_PG_STATEMENT_TIMEOUT_S` (300s) | Postgres itself cancels any single statement that runs longer. Server-side, so it holds even if this process is wedged. |
+| `POST /v1/admin/unstick` | Cancels this application's long-running statements by hand, via `pg_cancel_backend`. Precise: other connections are untouched. |
+| Restarting the service | Safe at any moment. Postgres rolls back whatever was in flight; ingests resume from the last completed chunk. |
 
-`POST /v1/admin/unstick` does the first step by hand, and the admin panel shows a
-**Cancel it now** button whenever writes are blocked. Neither needs the volume wiped.
-
-Every ingest also checkpoints when it finishes, folding the write-ahead log into the
-database file while nothing is waiting — left to grow, the WAL gets checkpointed in the
-middle of some later insert instead, which turns a small write into a long one at the
-worst possible moment.
+**On the DuckDB backend**, `write_health` is the thing to read, because DuckDB takes a
+single writer: if something stops making progress while holding it, every later write
+queues behind it. Writes give up after `TALAIA_WRITE_LOCK_TIMEOUT_S` (25s) and return
+`503` naming the holder, rather than hanging forever — the failure mode where reads
+answer in milliseconds, every button in the admin panel appears to do nothing, and
+nothing is logged because nothing has failed. A watchdog interrupts the running query
+after `TALAIA_WRITE_STUCK_AFTER_S` (90s) and, if that does not help, exits after
+`TALAIA_WRITE_FATAL_AFTER_S` so the platform restarts the process. If you are reading
+this section because that is happening to you, the fix is step 3: move to Postgres.
 
 `boot_bootstrap` is what became of the background load started at boot. It runs detached, so if it dies its traceback goes to the log and
 It runs detached, so if it dies its traceback goes to the log and nothing else notices —
@@ -494,10 +559,13 @@ the same image with:
 python -m talaia ingest
 ```
 
-⚠️ **Only when the API service is stopped.** DuckDB permits a single writer, and a cron
-container writing to the same volume while the API holds it will fail with a lock error.
-For a periodic refresh, the safer pattern is a scheduled redeploy against an emptied
-store, or adding an authenticated admin re-ingest endpoint that runs in-process.
+On Postgres this is safe to run **while the API is serving**: the cron container is just
+another client, and its writes do not block the API's. Point it at the same
+`TALAIA_DATABASE_URL` and give it the same image.
+
+On the DuckDB backend it is not — a second process cannot open the file for writing while
+the API holds it — so there the only options are stopping the service first or using the
+admin panel's per-dataset load, which runs in-process.
 
 OpenStreetMap needs no maintenance: tiles refresh themselves when their 14-day TTL
 expires.
@@ -544,25 +612,86 @@ pace with `TALAIA_WARM_PAUSE_S` and come back later rather than pushing through.
 
 ### Backups
 
+**The api_keys table lives in the database** — losing it revokes every key in existence,
+and because only hashes are stored there is no way to reconstruct them or to tell whose
+they were.
+
+```bash
+# Postgres: a full logical dump, restorable with psql
+railway run --service Postgres pg_dump "$DATABASE_URL" > talaia-$(date +%F).sql
+```
+
+Railway does not snapshot for you unless the template you deployed says it does. Check
+whether yours is PITR-capable; if not, run the dump on a schedule and keep it somewhere
+that is not Railway.
+
+On the DuckDB backend the equivalent is copying the file off the volume:
+
 ```bash
 railway run cp /data/talaia.duckdb /data/talaia-$(date +%F).duckdb
 ```
-
-Railway volumes are not snapshotted for you. **The api_keys table lives in this file** —
-losing it revokes every key in existence.
 
 ### Costs and sizing
 
 | Resource | Typical |
 |---|---|
 | Image | ~700 MB |
-| Volume | ~150 MB store + 60 MB cache |
-| Memory | 400–900 MB under load (DuckDB capped at 1 GB) |
+| Database | ~250 MB once every source is loaded |
+| Memory (API) | 300–700 MB under load |
+| Memory (Postgres) | 512 MB is comfortable at this data size |
 | CPU | Bursty; a 17 km AOI is ~2 s of mostly single-core work |
 
-Scale vertically before horizontally: **the DuckDB file cannot be shared between
-replicas.** Two instances on one volume will fight over the write lock. For horizontal
-scale, implement the PostGIS backend behind the existing `Store` interface.
+**Replicas work on Postgres.** Every instance connects to the same database, so you can
+raise the replica count without them fighting over anything. Each one keeps its own
+connection pool of up to `TALAIA_PG_POOL_MAX` (12) connections, so keep
+`replicas × TALAIA_PG_POOL_MAX` comfortably below the server's `max_connections`
+(typically 100) and lower the pool ceiling before you scale past six or so instances.
+
+On the DuckDB backend replicas are not an option at all: the file cannot be shared, and
+two instances on one volume will fight over the write lock.
+
+---
+
+## Migrating an existing deployment
+
+If you are already running on a volume with the DuckDB backend, do not just set
+`TALAIA_DATABASE_URL` and redeploy. The new database starts empty, and while the assets
+would be re-ingested, **every API key your users are holding would stop working** — only
+hashes are stored, so they cannot be reconstructed, and there is no record of whose they
+were. The enrichment cache would go too, which is an hour of somebody else's geocoder.
+
+`python -m talaia migrate` copies a DuckDB store into Postgres: API keys, usage counters,
+signups, the tile cache, the enrichment cache, and the assets, networks and population
+grid. It upserts on the primary key, so it is safe to re-run and safe to interrupt.
+
+1. **Add the PostGIS database** (step 3) but do not point the API at it yet.
+2. **Stop the API service**, so nothing is writing to the DuckDB file while it is read.
+3. **Run the migration** from a container that has both the volume and the database:
+
+   ```bash
+   railway run python -m talaia migrate --to "$DATABASE_URL"
+   ```
+
+   It prints a row count per table when it finishes:
+
+   ```json
+   { "api_keys": 14, "assets": 348291, "enrichment_cache": 55102, ... }
+   ```
+
+4. **Set `TALAIA_DATABASE_URL`** on the API service (step 4) and redeploy.
+5. **Check it took**, before you detach anything:
+
+   ```bash
+   curl -s $TALAIA/v1/diagnostics | grep -o '"backend": "[a-z]*"'   # postgres
+   curl -s $TALAIA/v1/stats                                          # the same row counts
+   curl -s $TALAIA/v1/admin/keys -H "X-Admin-Key: $ADMIN"            # your keys, still there
+   ```
+
+   Try one of your existing API keys against a real query. If it works, the migration
+   carried the part that could not have been rebuilt.
+
+6. **Keep the volume for a few days** before removing it. It costs little and it is the
+   only copy of the old state.
 
 ---
 
@@ -571,7 +700,10 @@ scale, implement the PostGIS backend behind the existing `Store` interface.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Build fails: `docker VOLUME at Line N is not supported, use Railway Volumes` | A `VOLUME` instruction in the Dockerfile | Delete it. Railway rejects `VOLUME`; persistence comes from the volume you mount in step 3 |
-| `Could not set lock on file` | Two processes on one volume | Run a single replica; stop the API before any CLI write |
+| Boot fails: `PostGIS is not available on this database` | The database is plain Postgres, not PostGIS | Deploy a PostGIS template (step 3) and point `TALAIA_DATABASE_URL` at it. Plain Postgres cannot store geometry |
+| `Could not set lock on file` | Two processes on one volume, on the DuckDB backend | Move to Postgres (step 3). Until then, run a single replica and stop the API before any CLI write |
+| Admin panel buttons do nothing, reads are fine | A stalled ingest holding DuckDB's single writer | `GET /v1/diagnostics` will show `"backend": "duckdb"`. Move to Postgres (step 3); that is what this failure mode is |
+| `PoolTimeout` in the logs | More concurrent work than `TALAIA_PG_POOL_MAX` connections | Raise it, or lower the replica count. Check `max_connections` on the database first |
 | `/v1/stats` shows `"core_impl": "python"` | Rust stage failed | Check the build log; it is a performance loss, not an outage |
 | Everything returns 401 | No key, or it was lost with the volume | Mint one with `TALAIA_ADMIN_KEY`, or redeploy for a new bootstrap key |
 | `/v1/admin/keys` returns 404 | `TALAIA_ADMIN_KEY` not set | Set it and redeploy — the surface hides itself when unconfigured |

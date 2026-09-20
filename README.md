@@ -203,7 +203,8 @@ curl localhost:8000/v1/admin/keys -H "X-Admin-Key: $ADMIN"          # prefixes o
 curl -X DELETE localhost:8000/v1/admin/keys/talaia_sk_xTj2zp... -H "X-Admin-Key: $ADMIN"
 ```
 
-With the service stopped (DuckDB is single-writer), the CLI does the same:
+The CLI does the same. On Postgres it can run against a live service; on the DuckDB
+backend, stop the service first, because it holds the single writer:
 
 ```bash
 PYTHONPATH=api python -m talaia key create --tier unlimited --label deepfire-integration
@@ -466,13 +467,24 @@ Related: **[EMAIL-SETUP.md](docs/EMAIL-SETUP.md)** (Resend and SMTP) ·
 **[MCP.md](docs/MCP.md)** (agent access).
 
 Single service: a multi-stage Dockerfile (Rust → Node → Python) serves the API and the
-website from one process. Mount a volume at `/data`; an empty store self-bootstraps
-in-process on boot, because DuckDB is single-writer and a separate ingest process would be
-locked out.
+website from one process. An empty store self-bootstraps in-process on boot.
+
+**Storage is pluggable behind the `Store` interface.** Point `TALAIA_DATABASE_URL` at a
+Postgres with PostGIS and the service runs on that; leave it unset and it runs on an
+embedded DuckDB file under `/data`. DuckDB is the right default for development and the
+tests — no second service to run — and the wrong one for a deployment, because it takes a
+single writer, so one stalled ingest blocks every other write including API key
+management. Postgres takes concurrent writers and is what
+[DEPLOY-RAILWAY.md](docs/DEPLOY-RAILWAY.md) sets up.
 
 ```bash
-docker build -t talaia . && docker run -p 8000:8000 -v talaia-data:/data \
+# Postgres (what a deployment runs)
+docker build -t talaia . && docker run -p 8000:8000 \
+  -e TALAIA_DATABASE_URL=postgresql://user:pass@host:5432/talaia \
   -e TALAIA_ADMIN_KEY=... talaia
+
+# DuckDB on a volume (development, or a single-user instance)
+docker run -p 8000:8000 -v talaia-data:/data -e TALAIA_ADMIN_KEY=... talaia
 ```
 
 See `.env.example` for the full configuration surface.

@@ -9,6 +9,8 @@ the time.
 The other half is that a partial load must never look like a finished one, or the boot
 bootstrap will consider the source done and the rest will never arrive.
 """
+import asyncio
+
 import pytest
 
 from talaia.connectors.base import Connector, Coverage, IngestFilter, RawAsset, Tier
@@ -375,3 +377,124 @@ async def test_an_offline_placement_is_flagged_as_approximate():
     assert hit["approximate"] is True
     assert hit["geocoder"] == "geonames-offline"
     assert hit["quality"] <= 0.3, "a town centre must not outrank a street address"
+
+
+# ---------------------------------------------------------------------------
+# Loading several sources at once
+# ---------------------------------------------------------------------------
+class _Slow:
+    """A connector that takes measurable time, so overlap is observable."""
+
+    def __init__(self, sid, log, delay=0.15):
+        self.sid, self._log, self._delay = sid, log, delay
+        self.meta = SourceMeta(id=sid, name=sid, publisher="t", tier="resident",
+                               coverage="test", country="ES", licence="CC0")
+
+    def __call__(self):
+        return self
+
+    async def ingest(self, store, select=None):
+        self._log.append(("start", self.sid))
+        await asyncio.sleep(self._delay)
+        self._log.append(("end", self.sid))
+        return 1
+
+
+class _Backend:
+    """Just enough store for the prefetcher: it only reads `backend`."""
+
+    def __init__(self, backend):
+        self.backend = backend
+
+
+def _max_overlap(log) -> int:
+    live = peak = 0
+    for event, _ in log:
+        live += 1 if event == "start" else -1
+        peak = max(peak, live)
+    return peak
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_backend_loads_several_sources_at_once(monkeypatch):
+    """The point of moving off a single-writer store: a run of five sources should not
+    take five times as long as one."""
+    from talaia.services import prefetch as mod
+
+    monkeypatch.setattr(mod.settings, "ingest_concurrency", 3)
+    log: list[tuple[str, str]] = []
+    connectors = [_Slow(f"s{i}", log) for i in range(5)]
+    p = mod.Prefetcher()
+    p.start(_Backend("postgres"), connectors, IngestFilter())
+    await p._task
+
+    assert _max_overlap(log) == 3, "sources did not overlap up to the configured limit"
+    assert p.progress.status == "done"
+    assert all(s.status == "ok" for s in p.progress.sources)
+
+
+@pytest.mark.asyncio
+async def test_concurrency_is_capped_rather_than_unbounded(monkeypatch):
+    """These connectors read other people's public registries and geocoders. Firing
+    every source at once would be rude and would get the service rate-limited."""
+    from talaia.services import prefetch as mod
+
+    monkeypatch.setattr(mod.settings, "ingest_concurrency", 2)
+    log: list[tuple[str, str]] = []
+    p = mod.Prefetcher()
+    p.start(_Backend("postgres"), [_Slow(f"s{i}", log) for i in range(6)], IngestFilter())
+    await p._task
+    assert _max_overlap(log) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_duckdb_backend_still_loads_one_at_a_time(monkeypatch):
+    """Overlapping them there would only queue behind the single writer, so the
+    prefetcher must not pretend otherwise."""
+    from talaia.services import prefetch as mod
+
+    monkeypatch.setattr(mod.settings, "ingest_concurrency", 4)
+    log: list[tuple[str, str]] = []
+    p = mod.Prefetcher()
+    p.start(_Backend("duckdb"), [_Slow(f"s{i}", log) for i in range(4)], IngestFilter())
+    await p._task
+    assert _max_overlap(log) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_failing_source_does_not_stop_the_others(monkeypatch):
+    from talaia.services import prefetch as mod
+
+    monkeypatch.setattr(mod.settings, "ingest_concurrency", 3)
+    log: list[tuple[str, str]] = []
+
+    class Broken(_Slow):
+        async def ingest(self, store, select=None):
+            raise RuntimeError("upstream is down")
+
+    connectors = [_Slow("ok1", log), Broken("bad", log), _Slow("ok2", log)]
+    p = mod.Prefetcher()
+    p.start(_Backend("postgres"), connectors, IngestFilter())
+    await p._task
+
+    by_id = {s.source_id: s for s in p.progress.sources}
+    assert by_id["bad"].status == "failed" and "upstream is down" in by_id["bad"].error
+    assert by_id["ok1"].status == "ok" and by_id["ok2"].status == "ok"
+    assert p.progress.status == "partial"
+
+
+@pytest.mark.asyncio
+async def test_the_panel_is_told_every_source_currently_running(monkeypatch):
+    """`current` drives the "Loading ..." line. With several in flight it has to name
+    all of them, or the panel reports one source while three are working."""
+    from talaia.services import prefetch as mod
+
+    monkeypatch.setattr(mod.settings, "ingest_concurrency", 3)
+    log: list[tuple[str, str]] = []
+    p = mod.Prefetcher()
+    p.start(_Backend("postgres"), [_Slow(f"s{i}", log, delay=0.3) for i in range(3)],
+            IngestFilter())
+    await asyncio.sleep(0.1)
+    assert p.progress.current == "s0, s1, s2"
+    await p._task
+    assert p.progress.current is None

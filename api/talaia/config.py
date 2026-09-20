@@ -5,6 +5,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -14,6 +15,36 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TALAIA_", env_file=".env", extra="ignore")
 
     # --- storage -------------------------------------------------------
+    # Which engine backs the store. Set this and TALAIA runs on Postgres; leave it empty
+    # and it runs on the embedded DuckDB file, which is what local development and the
+    # test suite use.
+    #
+    # Postgres is what a deployment should run. DuckDB accepts exactly one writer, so a
+    # single stalled ingest holds every other write in the process behind it - no new
+    # API keys, no revocations, no signups, no tile-cache updates - until the requests
+    # time out. Postgres has no such chokepoint: several ingests, several users signing
+    # up and the tile cache all write at the same time.
+    #
+    # Accepts DATABASE_URL as well as TALAIA_DATABASE_URL, because that is the name
+    # Railway's Postgres service injects and making people rename it is a needless step.
+    database_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("TALAIA_DATABASE_URL", "DATABASE_URL"))
+    # Connections held open to Postgres. The ceiling wants to stay comfortably under the
+    # server's max_connections, since each web worker keeps its own pool.
+    pg_pool_min: int = 2
+    pg_pool_max: int = 12
+    pg_pool_timeout_s: float = 30.0
+    # Recycle connections periodically so a long-lived process cannot accumulate
+    # backends that a restarted database no longer knows about.
+    pg_pool_max_lifetime_s: float = 3600.0
+    pg_connect_timeout_s: float = 10.0
+    # Server-side ceiling on a single statement. This is the safety net the DuckDB
+    # backend never had: a statement that stops making progress is killed by Postgres
+    # itself, rather than holding a resource until somebody notices. Generous enough for
+    # a bulk ingest chunk, short enough that nothing waits on it all day.
+    pg_statement_timeout_s: float = 300.0
+
     data_dir: Path = REPO_ROOT / "data"
     db_filename: str = "talaia.duckdb"
     duckdb_memory_limit: str = "1GB"
@@ -83,6 +114,15 @@ class Settings(BaseSettings):
     max_aoi_km2: float = 25_000.0
     max_assets_returned: int = 20_000
     default_buffer_m: float = 0.0
+
+    # How many sources a single prefetch run loads at once. Only honoured on a backend
+    # that takes concurrent writers; the DuckDB store forces it to 1, since there the
+    # sources would queue behind the single writer regardless.
+    #
+    # Kept small on purpose. Each connector is already internally concurrent, and what
+    # it is concurrent against is somebody else's public registry or geocoder. This is a
+    # limit on how much of that traffic TALAIA generates at once, not a throughput dial.
+    ingest_concurrency: int = 3
 
     # --- feature flags ---------------------------------------------------
     enable_live_osm: bool = True
@@ -170,6 +210,10 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.data_dir / self.db_filename
+
+    @property
+    def uses_postgres(self) -> bool:
+        return bool(self.database_url.strip())
 
     @property
     def warm_on_boot_list(self) -> list[str]:

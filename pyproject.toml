@@ -11,6 +11,10 @@ dependencies = [
   # and only xlrd can. Undeclared, it is present on a development machine by accident
   # and absent from the image, so the source fails in production and nowhere else.
   "xlrd>=2.0",
+  # Postgres is the deployment backend (see api/talaia/pgstore.py). DuckDB stays for
+  # local development and the tests, so both drivers ship. The binary wheel avoids
+  # needing libpq and a compiler in the image.
+  "psycopg[binary]>=3.2", "psycopg-pool>=3.2",
 ]
 
 [build-system]
