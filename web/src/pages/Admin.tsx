@@ -2,20 +2,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Code, Note, Pill } from "../components/ui";
 import {
   AdminAuthError, adminClearPending, adminCreateKey, adminEmailStatus, adminEmailTest,
-  adminDeleteKey, adminListKeys, adminRevokeByEmail, adminRevokeKey, adminSignups,
+  adminDeleteKey, adminListKeys, adminPrefetchStart, adminPrefetchStatus,
+  adminPrefetchStop, adminRevokeByEmail, adminRevokeKey, adminSignups,
   adminUpdateKey,
   adminUsage, adminWarmStart, adminWarmStatus, adminWarmStop, getAdminKey, getCoverage,
   getRegions, getStats, getTiers, num, setAdminKey, type AdminKey,
 } from "../api";
 
-type Tab = "keys" | "signups" | "usage" | "tiers" | "data" | "email";
+type Tab = "keys" | "signups" | "usage" | "tiers" | "datasets" | "data" | "email";
 
 const TABS: [Tab, string][] = [
   ["keys", "API keys"],
   ["signups", "Signups"],
   ["usage", "Usage"],
   ["tiers", "Tiers"],
-  ["data", "Data & cache"],
+  ["datasets", "Datasets"],
+  ["data", "Cache & coverage"],
   ["email", "Email"],
 ];
 
@@ -155,6 +157,10 @@ function Keys({ notify }: { notify: (s: string) => void }) {
   const [form, setForm] = useState({ label: "", tier: "standard", email: "" });
   const [busy, setBusy] = useState(false);
   const { request: ask, dialog } = useConfirm();
+  // Per-row outcome. The page-level banner sits above a table that scrolls, so on a long
+  // list the answer to "did that do anything?" was rendered off-screen.
+  const [acting, setActing] = useState<string | null>(null);
+  const [rowMsg, setRowMsg] = useState<{ prefix: string; text: string; bad: boolean } | null>(null);
 
   const load = useCallback(async () => {
     try { setKeys(await adminListKeys()); setError(null); }
@@ -188,8 +194,17 @@ function Keys({ notify }: { notify: (s: string) => void }) {
         + "The key stays in the list, marked revoked, so you can still see it was used.",
       action: "Revoke",
     })) return;
-    try { await adminRevokeKey(k.prefix); notify(`Revoked ${k.prefix}`); await load(); }
-    catch (e: any) { setError(e.message); }
+    setActing(k.prefix);
+    setRowMsg(null);
+    try {
+      await adminRevokeKey(k.prefix);
+      notify(`Revoked ${k.prefix}`);
+      setRowMsg({ prefix: k.prefix, text: "Revoked", bad: false });
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+      setRowMsg({ prefix: k.prefix, text: e.message, bad: true });
+    } finally { setActing(null); }
   };
 
   const remove = async (k: AdminKey) => {
@@ -201,8 +216,17 @@ function Keys({ notify }: { notify: (s: string) => void }) {
         + "To keep the record, revoke it instead.",
       action: "Delete permanently",
     })) return;
-    try { await adminDeleteKey(k.prefix); notify(`Deleted ${k.prefix}`); await load(); }
-    catch (e: any) { setError(e.message); }
+    setActing(k.prefix);
+    setRowMsg(null);
+    try {
+      await adminDeleteKey(k.prefix);
+      notify(`Deleted ${k.prefix}`);
+      setRowMsg({ prefix: k.prefix, text: "Deleted", bad: false });
+      await load();
+    } catch (e: any) {
+      setError(e.message);
+      setRowMsg({ prefix: k.prefix, text: e.message, bad: true });
+    } finally { setActing(null); }
   };
 
   const retier = async (k: AdminKey, tier: string) => {
@@ -334,11 +358,23 @@ function Keys({ notify }: { notify: (s: string) => void }) {
                     {k.source === "env" ? (
                       <span className="text-[11px] text-slate-600">edit env</span>
                     ) : (
-                      <div className="flex items-center justify-end gap-1.5">
-                        {!k.revoked_at && (
-                          <button className={btnDanger} onClick={() => revoke(k)}>Revoke</button>
+                      <div className="flex flex-col items-end gap-1">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {!k.revoked_at && (
+                            <button className={btnDanger} disabled={acting === k.prefix}
+                              onClick={() => revoke(k)}>
+                              {acting === k.prefix ? "Working…" : "Revoke"}
+                            </button>
+                          )}
+                          <button className={btnGhost} disabled={acting === k.prefix}
+                            onClick={() => remove(k)}>Delete</button>
+                        </div>
+                        {rowMsg?.prefix === k.prefix && (
+                          <span className={`max-w-[18rem] text-right text-[11px] ${
+                            rowMsg.bad ? "text-rose-300" : "text-emerald-300"}`}>
+                            {rowMsg.text}
+                          </span>
                         )}
-                        <button className={btnGhost} onClick={() => remove(k)}>Delete</button>
                       </div>
                     )}
                   </td>
@@ -599,6 +635,170 @@ TALAIA_TIER_LIMITS='{"free":{"max_aoi_km2":500,"daily_quota":5000}}'`}</Code>
 }
 
 // ---------------------------------------------------------------------------
+/** Loading a source on demand, in full or in part.
+ *
+ * A cold volume is about an hour, nearly all of it geocoding ~55,000 addresses. That is
+ * the right trade for a deployment serving all of Spain and the wrong one for a demo of
+ * one province, so naming a place cuts the work before the geocoder is asked anything:
+ * the national school registry is 45 minutes whole and about 90 seconds for Girona.
+ */
+function Prefetch({ notify }: { notify: (s: string) => void }) {
+  const [data, setData] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [place, setPlace] = useState("");
+  const [limit, setLimit] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try { setData(await adminPrefetchStatus()); setError(null); }
+    catch (e: any) { setError(e.message); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  // Poll only while something is actually running.
+  useEffect(() => {
+    if (!data?.running) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [data?.running, load]);
+
+  const start = async (sources?: string[]) => {
+    setBusy(sources ? sources[0] : "all");
+    try {
+      const body: Record<string, any> = {};
+      if (sources) body.sources = sources;
+      if (place.trim()) body.place = place.trim();
+      if (limit.trim()) body.limit = Number(limit.trim());
+      await adminPrefetchStart(body);
+      notify(sources ? `Loading ${sources[0]}` : "Loading every source");
+      await load();
+    } catch (e: any) { setError(e.message); } finally { setBusy(null); }
+  };
+
+  const stop = async () => {
+    try { await adminPrefetchStop(); notify("Prefetch stopped"); await load(); }
+    catch (e: any) { setError(e.message); }
+  };
+
+  const run = data?.run;
+  const sources: any[] = data?.sources ?? [];
+  const loaded = sources.filter((s) => s.rows > 0).length;
+
+  return (
+    <div className="space-y-4">
+      {error && <Note kind="warn">{error}</Note>}
+
+      <Card className="p-5">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div className="text-sm font-medium text-slate-200">Load a dataset</div>
+          <div className="text-xs text-slate-500">
+            {loaded} of {sources.length} hold data
+          </div>
+        </div>
+        <p className="mt-1 text-xs leading-relaxed text-slate-500">
+          Leave both boxes empty for the full source. Naming a place is what makes a big
+          registry quick — it is matched against the municipality and province the
+          publisher writes, before anything is geocoded.
+        </p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-[2fr_1fr_auto]">
+          <input className={input} placeholder="Place, e.g. Girona (optional)"
+            value={place} onChange={(e) => setPlace(e.target.value)} />
+          <input className={input} placeholder="Max records (optional)" inputMode="numeric"
+            value={limit} onChange={(e) => setLimit(e.target.value)} />
+          <button className={btn} disabled={!!busy || data?.running}
+            onClick={() => start()}>Load all</button>
+        </div>
+      </Card>
+
+      {data?.boot_bootstrap && data.boot_bootstrap.state === "failed" && (
+        <Note kind="warn">
+          The background load started at boot died: <code>{data.boot_bootstrap.error}</code>
+          {" "}Nothing retries it automatically — load the sources below, or redeploy.
+        </Note>
+      )}
+
+      {run && run.status !== "idle" && (
+        <Card className="p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-sm text-slate-300">
+              {data.running ? `Loading ${run.current ?? "…"}` : `Last run: ${run.status}`}
+              <span className="ml-2 text-xs text-slate-500">
+                {num(run.rows)} rows · {run.selection} · {Math.round(run.elapsed_s)}s
+              </span>
+            </div>
+            {data.running && (
+              <button className={btnDanger} onClick={stop}>Stop</button>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {run.sources.map((s: any) => (
+              <span key={s.source_id} title={s.error ?? ""}
+                className={`rounded px-2 py-0.5 text-[11px] ${
+                  s.status === "failed" ? "bg-rose-500/15 text-rose-300"
+                  : s.status === "running" ? "bg-ember-500/20 text-ember-200"
+                  : s.status === "queued" ? "bg-slate-700/40 text-slate-400"
+                  : "bg-emerald-500/15 text-emerald-300"}`}>
+                {s.source_id} {s.status === "queued" ? "" : `· ${num(s.rows)}`}
+              </span>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <div className="overflow-x-auto rounded-xl border border-slate-800">
+        <table className="w-full text-sm">
+          <thead className="bg-night-800/60 text-[11px] uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">Dataset</th>
+              <th className="px-3 py-2 text-right font-medium">Rows</th>
+              <th className="px-3 py-2 text-left font-medium">State</th>
+              <th className="px-3 py-2 text-right font-medium"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sources.map((s) => (
+              <tr key={s.id} className="border-t border-slate-800/70">
+                <td className="px-3 py-2.5">
+                  <div className="font-mono text-[12px] text-slate-200">{s.id}</div>
+                  <div className="text-[11px] text-slate-500">{s.name}</div>
+                </td>
+                <td className="px-3 py-2.5 text-right tabular-nums text-[12.5px]">
+                  {s.rows ? num(s.rows) : "—"}
+                </td>
+                <td className="px-3 py-2.5">
+                  <Pill>{s.last_status}</Pill>
+                  {s.last_error && (
+                    <div className="mt-1 max-w-[22rem] truncate text-[11px] text-slate-500"
+                      title={s.last_error}>{s.last_error}</div>
+                  )}
+                </td>
+                <td className="px-3 py-2.5 text-right">
+                  {s.prefetchable ? (
+                    <button className={btnGhost} disabled={!!busy || data?.running}
+                      onClick={() => start([s.id])}>
+                      {s.rows ? "Reload" : "Load"}
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-slate-600">on demand</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <Note>
+        A filtered load is recorded as <code>partial</code>, never complete, so the
+        source is still picked up in full the next time the service boots. One load runs
+        at a time — DuckDB takes a single writer.
+      </Note>
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
 function Data({ notify }: { notify: (s: string) => void }) {
   const [stats, setStats] = useState<any>(null);
   const [coverage, setCoverage] = useState<any>(null);
@@ -850,6 +1050,7 @@ export default function Admin() {
         {tab === "signups" && <Signups notify={notify} />}
         {tab === "usage" && <Usage />}
         {tab === "tiers" && <Tiers />}
+        {tab === "datasets" && <Prefetch notify={notify} />}
         {tab === "data" && <Data notify={notify} />}
         {tab === "email" && <Email notify={notify} />}
       </div>

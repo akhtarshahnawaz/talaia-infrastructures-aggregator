@@ -778,6 +778,101 @@ async def email_test(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Admin - loading a source on demand
+# ---------------------------------------------------------------------------
+def _boot_task_state(request: Request) -> dict[str, Any]:
+    """What became of the bootstrap task started at boot.
+
+    It runs detached in the background, so when it dies its traceback goes to the log and
+    nothing else notices - the store simply stops filling and the panel shows sources
+    that never load. Surfacing it here turns "nothing is happening" into an answer.
+    """
+    task = getattr(request.app.state, "bootstrap_task", None)
+    if task is None:
+        return {"state": "not_started",
+                "note": "Nothing was pending at boot, or auto-bootstrap is off."}
+    if not task.done():
+        return {"state": "running"}
+    if task.cancelled():
+        return {"state": "cancelled"}
+    exc = task.exception()
+    return {"state": "failed", "error": f"{type(exc).__name__}: {exc}"[:300]} if exc \
+        else {"state": "finished"}
+
+
+@admin_router.get("/prefetch", summary="What is loaded, and any run in progress")
+async def prefetch_status(request: Request) -> dict[str, Any]:
+    """Every registered source with what it holds, plus the live run if there is one."""
+    from ..connectors import registry
+    from ..connectors.base import Tier
+    from ..services.prefetch import prefetcher
+
+    stats = await get_store().source_stats()
+    sources = []
+    for cls in registry.all_connectors():
+        entry = stats.get(cls.meta.id, {})
+        sources.append({
+            "id": cls.meta.id,
+            "name": cls.meta.name,
+            "tier": cls.meta.tier,
+            "coverage": cls.meta.coverage,
+            "rows": entry.get("rows", 0),
+            "last_run_at": entry.get("last_run_at"),
+            "last_status": entry.get("last_status", "never_run"),
+            "last_error": entry.get("last_error"),
+            # On-demand sources fill from live queries and cache warming, not from here.
+            "prefetchable": cls.tier is Tier.RESIDENT,
+        })
+    sources.sort(key=lambda s: (s["rows"] > 0, s["id"]))
+    return {"sources": sources, "run": prefetcher.progress.as_dict(),
+            "running": prefetcher.running, "boot_bootstrap": _boot_task_state(request)}
+
+
+@admin_router.post("/prefetch", summary="Load one or more sources now")
+async def start_prefetch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Load sources in the background, optionally only part of them.
+
+    ``place`` is the useful one on a big registry: a municipality or province as the
+    publisher spells it, matched accent- and case-insensitively, applied before anything
+    is geocoded. ``region`` takes a gazetteer key and filters on coordinates, which
+    narrows what is stored but not the geocoding on an address-only source. ``limit``
+    caps the records considered and works on anything.
+
+    Runs in this process on purpose: DuckDB takes one writer and the API holds it.
+    """
+    from ..services.prefetch import build_filter, prefetcher, resolve_sources
+
+    ids = payload.get("sources") or payload.get("source") or []
+    if isinstance(ids, str):
+        ids = [ids]
+    limit = payload.get("limit")
+    try:
+        connectors = resolve_sources([str(i) for i in ids] or None)
+        select = build_filter(place=payload.get("place"),
+                              region=payload.get("region"),
+                              limit=int(limit) if limit is not None else None)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not connectors:
+        raise HTTPException(status_code=422, detail="No sources to load.")
+    try:
+        progress = prefetcher.start(get_store(), connectors, select)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"started": True, **progress.as_dict()}
+
+
+@admin_router.delete("/prefetch", summary="Stop the running prefetch")
+async def stop_prefetch() -> dict[str, Any]:
+    """Stops after the chunk in flight. Rows already written stay - the source is left
+    marked partial, so a later full load still picks it up."""
+    from ..services.prefetch import prefetcher
+
+    stopped = await prefetcher.cancel()
+    return {"stopped": stopped, **prefetcher.progress.as_dict()}
+
+
+# ---------------------------------------------------------------------------
 # Admin - cache warming
 # ---------------------------------------------------------------------------
 @admin_router.post("/warm", summary="Pre-load the OSM tile cache for a region")

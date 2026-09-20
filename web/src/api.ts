@@ -207,6 +207,12 @@ export const adminDeleteKey = (prefix: string) =>
 export const adminRevokeByEmail = (email: string) =>
   admin<any>(`/v1/admin/keys?email=${encodeURIComponent(email)}`, { method: "DELETE" });
 
+export const adminPrefetchStatus = () => admin<any>("/v1/admin/prefetch");
+export const adminPrefetchStart = (body: Record<string, any>) =>
+  admin<any>("/v1/admin/prefetch", { method: "POST", body: JSON.stringify(body) });
+export const adminPrefetchStop = () =>
+  admin<any>("/v1/admin/prefetch", { method: "DELETE" });
+
 export const adminUsage = (days = 14) => admin<any>(`/v1/admin/usage?days=${days}`);
 export const adminSignups = () => admin<any>("/v1/admin/signups");
 export const adminClearPending = (email: string) =>

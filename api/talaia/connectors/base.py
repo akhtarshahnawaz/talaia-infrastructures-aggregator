@@ -73,6 +73,59 @@ class RawAsset:
     needs_geocoding: bool = False
 
 
+@dataclass(frozen=True)
+class IngestFilter:
+    """Load part of a source instead of all of it.
+
+    The national registries are national: the school one is ~51,000 addresses and the
+    best part of an hour, almost all of it geocoding. For a demo of one city that is
+    wasted, so this narrows the work *before* the geocoder is asked anything.
+
+    ``places`` is the one that saves the time. Every address-bearing registry publishes a
+    municipality and usually a province, so matching those by name discards the records
+    we will never use while they are still free. ``bbox`` is a coordinate test and can
+    only be applied once a coordinate exists - immediately for sources that publish one,
+    after geocoding for the rest - so it narrows the data but not the work. ``limit`` is
+    the blunt instrument that works on anything.
+    """
+    bbox: tuple[float, float, float, float] | None = None
+    places: frozenset[str] = frozenset()
+    limit: int | None = None
+
+    @property
+    def is_partial(self) -> bool:
+        return bool(self.bbox or self.places or self.limit)
+
+    def describe(self) -> str:
+        bits = []
+        if self.places:
+            bits.append("places=" + "/".join(sorted(self.places)))
+        if self.bbox:
+            bits.append("bbox=" + ",".join(f"{c:g}" for c in self.bbox))
+        if self.limit:
+            bits.append(f"limit={self.limit:,}")
+        return ", ".join(bits) or "everything"
+
+    def wanted_place(self, item: "RawAsset") -> bool:
+        """Text test, applied before any geocoding."""
+        if not self.places:
+            return True
+        from ..norm import fold
+        addr = item.address or {}
+        for key in ("municipality", "province", "region", "locality", "town"):
+            value = fold(addr.get(key))
+            if value and value in self.places:
+                return True
+        return False
+
+    def wanted_point(self, lon: float | None, lat: float | None) -> bool:
+        """Coordinate test. Unknown coordinates pass; they are judged after geocoding."""
+        if not self.bbox or lon is None or lat is None:
+            return True
+        x0, y0, x1, y1 = self.bbox
+        return x0 <= lon <= x1 and y0 <= lat <= y1
+
+
 class Connector(ABC):
     """Base class. Subclasses set ``meta`` and implement ``fetch`` + ``normalise``."""
 
@@ -91,8 +144,8 @@ class Connector(ABC):
         raise NotImplementedError
 
     # -- shared plumbing ---------------------------------------------------
-    async def ingest(self, store, batch_size: int = 5_000,
-                     geocode_chunk: int = 500) -> int:
+    async def ingest(self, store, batch_size: int = 5_000, geocode_chunk: int = 500,
+                     select: "IngestFilter | None" = None) -> int:
         """Fetch -> normalise -> upsert. Used by the CLI and the boot bootstrap.
 
         Address-only records are geocoded in chunks and written as each chunk lands,
@@ -101,16 +154,35 @@ class Connector(ABC):
         that window - and every redeploy is one - threw the whole source away and started
         from nothing. Progress is recorded per chunk so a resumed boot can tell a source
         that finished from one that was interrupted.
+
+        ``select`` loads part of the source - a city, a province, or simply the first N
+        records. A filtered run is recorded as ``partial`` however it ends, because it
+        deliberately did not load everything and a later full load must still run.
         """
         from ..norm import asset_id, point_wkt, valid_lonlat
         from ..taxonomy import get_subcategory
 
         started = datetime.now(timezone.utc).replace(tzinfo=None)
         total, skipped, geocoded, out_of_coverage, batch = 0, 0, 0, 0, []
+        filtered = 0
         pending_geocode: list[RawAsset] = []
+        select = select or IngestFilter()
+        if select.is_partial:
+            log.info("%s: partial load (%s)", self.meta.id, select.describe())
         try:
             async for raw in self.fetch():
+                if select.limit is not None and total + len(batch) + len(
+                        pending_geocode) >= select.limit:
+                    break
                 for item in self.normalise(raw):
+                    # Discard what this run does not want while it is still free - before
+                    # the geocoder is asked anything, which is where the hour goes.
+                    if not select.wanted_place(item):
+                        filtered += 1
+                        continue
+                    if not select.wanted_point(item.lon, item.lat):
+                        filtered += 1
+                        continue
                     # Registries that publish an address but no coordinates are resolved
                     # through the Tier C geocoder, in chunks once the fetch completes.
                     if item.needs_geocoding and not valid_lonlat(item.lon, item.lat):
@@ -168,6 +240,12 @@ class Connector(ABC):
                 chunk = pending_geocode[start:start + geocode_chunk]
                 geocoded_rows, failed = await self._geocode_batch(chunk, store)
                 skipped += failed
+                if select.bbox:
+                    # These had no coordinate to test until now.
+                    kept = [r for r in geocoded_rows
+                            if select.wanted_point(r.get("lon"), r.get("lat"))]
+                    filtered += len(geocoded_rows) - len(kept)
+                    geocoded_rows = kept
                 geocoded += len(geocoded_rows)
                 if geocoded_rows:
                     total += await store.upsert_assets(geocoded_rows)
@@ -177,10 +255,14 @@ class Connector(ABC):
                 log.info("%s: geocoded %s/%s addresses (%s rows so far)", self.meta.id,
                          f"{min(start + geocode_chunk, len(pending_geocode)):,}",
                          f"{len(pending_geocode):,}", f"{total:,}")
-            await store.record_run(self.meta.id, "ok", total, started)
+            # A filtered run never claims the source is complete: it deliberately left
+            # records out, and the boot bootstrap must still come back for them.
+            await store.record_run(
+                self.meta.id, "partial" if select.is_partial else "ok", total, started,
+                f"partial load: {select.describe()}" if select.is_partial else None)
             log.info("%s: ingested %s rows (%s geocoded, %s skipped for bad geometry, "
-                     "%s outside %s)", self.meta.id, total, geocoded, skipped,
-                     out_of_coverage, self.coverage.label)
+                     "%s outside %s, %s filtered out)", self.meta.id, total, geocoded,
+                     skipped, out_of_coverage, self.coverage.label, filtered)
             return total
         except Exception as exc:
             await store.record_run(self.meta.id, "error", total, started, str(exc)[:500])

@@ -226,6 +226,39 @@ second pass re-reads them rather than re-asking CartoCiudad. It is still wasted 
 time. **If you can, avoid pushing during the first hour of a fresh volume**, and check
 `GET /v1/sources` for `last_status` before assuming a deploy is fully loaded.
 
+### Loading a source yourself
+
+The **Datasets** tab of the admin panel lists every registered source with what it holds
+and a button to load it, so you do not have to wait for a boot to fix a source that
+failed or never ran. The same thing over HTTP:
+
+```bash
+# One source, in full
+curl -X POST $TALAIA/v1/admin/prefetch -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' -d '{"sources":["es.msan.hospitales"]}'
+
+# One province of the national school registry: ~90 seconds instead of ~45 minutes
+curl -X POST $TALAIA/v1/admin/prefetch -H "X-Admin-Key: $ADMIN" \
+  -H 'content-type: application/json' \
+  -d '{"sources":["es.meq.schools"],"place":"Girona"}'
+
+curl -s $TALAIA/v1/admin/prefetch -H "X-Admin-Key: $ADMIN"   # progress
+curl -X DELETE $TALAIA/v1/admin/prefetch -H "X-Admin-Key: $ADMIN"   # stop
+```
+
+`place` is a municipality or province as the publisher spells it, matched accent- and
+case-insensitively **before anything is geocoded** — which is why it is fast. `region`
+takes a key from `GET /v1/regions` and filters on coordinates instead, so it narrows what
+is stored but not the geocoding an address-only source has to do. `limit` caps the
+records considered and works on any source.
+
+A filtered load is recorded as `partial`, never `ok`, so the next boot still loads the
+source in full.
+
+That response also reports `boot_bootstrap`, which is what became of the background load
+started at boot. It runs detached, so if it dies its traceback goes to the log and
+nothing else notices — `{"state": "failed", "error": "..."}` is how you find out.
+
 ---
 
 ## 8. Generate a domain and mint your unlimited key
