@@ -44,6 +44,18 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _as_mb(value: str) -> int | None:
+    """Parse a DuckDB size string such as ``1GB`` or ``512MB`` into megabytes."""
+    text = str(value).strip().upper()
+    for suffix, mult in (("TB", 1_048_576), ("GB", 1024), ("MB", 1), ("KB", 0)):
+        if text.endswith(suffix):
+            try:
+                return max(1, int(float(text[: -len(suffix)]) * mult))
+            except ValueError:
+                return None
+    return None
+
+
 def _j(value: Any) -> str:
     if value is None:
         return "{}"
@@ -115,12 +127,53 @@ class Store:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._con = duckdb.connect(str(self.db_path))
         self._con.execute("INSTALL spatial; LOAD spatial; INSTALL json; LOAD json;")
-        self._con.execute(f"SET memory_limit='{settings.duckdb_memory_limit}'")
-        self._con.execute(f"SET threads={settings.duckdb_threads}")
+        memory, threads = self._sized_for_container()
+        self._con.execute(f"SET memory_limit='{memory}'")
+        self._con.execute(f"SET threads={threads}")
+        # Bound the spill. Left to itself DuckDB will fill the volume the database lives
+        # on, and a full volume is a write that never completes.
+        self._con.execute(f"SET temp_directory='{self.db_path.parent}'")
+        self._con.execute(
+            f"SET max_temp_directory_size='{settings.duckdb_temp_limit}'")
         self._apply_schema()
         self._migrate()
         self._warm_indexes()
         log.info("store ready at %s", self.db_path)
+
+    def _sized_for_container(self) -> tuple[str, int]:
+        """Clamp DuckDB to the box it is actually in.
+
+        The configured values are a ceiling, not an instruction. A container can be far
+        smaller than the defaults assume, and DuckDB takes its memory limit literally:
+        told it may use 1GB inside a 512MB container, it will spill to disk relentlessly
+        or be killed, and told to run four threads on a fraction of a core it will
+        thrash. Either way a bulk write that should take a second takes minutes, holds
+        the single writer while it does, and everything behind it stops.
+        """
+        from .diagnostics import container_limits
+
+        limits = container_limits()
+        memory = settings.duckdb_memory_limit
+        threads = settings.duckdb_threads
+
+        cap_mb = limits.get("memory_limit_mb")
+        if cap_mb:
+            # Leave room for Python, the HTTP client and whatever the request is doing;
+            # DuckDB is a guest in this process, not the whole of it.
+            budget = max(128, int(cap_mb * 0.5))
+            if _as_mb(memory) is None or _as_mb(memory) > budget:
+                log.warning("clamping DuckDB memory from %s to %dMB for a %dMB container",
+                            memory, budget, cap_mb)
+                memory = f"{budget}MB"
+
+        cores = limits.get("cpu_quota_cores")
+        if cores:
+            allowed = max(1, int(cores + 0.5))
+            if threads > allowed:
+                log.warning("clamping DuckDB threads from %d to %d for %.2f of a core",
+                            threads, allowed, cores)
+                threads = allowed
+        return memory, max(1, threads)
 
     def _apply_schema(self) -> None:
         """Apply DDL. Comments are stripped first: a ';' inside a '--' comment would
@@ -200,6 +253,10 @@ class Store:
 
     async def fetch(self, sql: str, params: Sequence[Any] | None = None) -> list[tuple]:
         return await asyncio.to_thread(self._fetch, sql, params)
+
+    def fetch_sync(self, sql: str, params: Sequence[Any] | None = None) -> list[tuple]:
+        """For diagnostics, which must answer even when the thread pool is the problem."""
+        return self._fetch(sql, params)
 
     # -- writes ------------------------------------------------------------
     def _bulk_upsert(self, table: str, columns: list[str], rows: list[dict]) -> int:

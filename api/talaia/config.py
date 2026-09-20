@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     db_filename: str = "talaia.duckdb"
     duckdb_memory_limit: str = "1GB"
     duckdb_threads: int = 4
+    # Ceiling on DuckDB's spill directory, so a big write cannot fill the volume.
+    duckdb_temp_limit: str = "2GB"
 
     # --- OpenStreetMap / Overpass --------------------------------------
     # Ordered by preference; the client rotates on failure and tracks per-mirror health.

@@ -261,3 +261,62 @@ async def test_write_health_names_the_holder_while_it_runs(store):
     await task
     assert store.write_health()["holder"] is None
     assert store.write_health()["last_write_ok"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Sizing DuckDB to the container it is actually in.
+# ---------------------------------------------------------------------------
+def test_duckdb_is_clamped_to_a_small_container(monkeypatch):
+    """Told it may use 1GB inside a 512MB container, DuckDB takes that literally: it
+    spills relentlessly or gets killed, a bulk write that should take a second takes
+    minutes, and it holds the single writer the whole time."""
+    from talaia import store as store_mod
+    from talaia.config import settings
+    from talaia.store import Store
+
+    monkeypatch.setattr(settings, "duckdb_memory_limit", "1GB")
+    monkeypatch.setattr(settings, "duckdb_threads", 4)
+    monkeypatch.setattr(store_mod, "container_limits", lambda: {}, raising=False)
+    monkeypatch.setattr(
+        "talaia.diagnostics.container_limits",
+        lambda: {"memory_limit_mb": 512, "cpu_quota_cores": 0.5})
+
+    memory, threads = Store("/tmp/unused.duckdb")._sized_for_container()
+    assert memory == "256MB", "half of the container, leaving room for everything else"
+    assert threads == 1, "four threads on half a core is thrash, not parallelism"
+
+
+def test_a_generous_container_keeps_the_configured_values(monkeypatch):
+    from talaia.config import settings
+    from talaia.store import Store
+
+    monkeypatch.setattr(settings, "duckdb_memory_limit", "1GB")
+    monkeypatch.setattr(settings, "duckdb_threads", 4)
+    monkeypatch.setattr(
+        "talaia.diagnostics.container_limits",
+        lambda: {"memory_limit_mb": 8192, "cpu_quota_cores": 8})
+
+    assert Store("/tmp/unused.duckdb")._sized_for_container() == ("1GB", 4)
+
+
+def test_no_cgroup_means_no_clamping(monkeypatch):
+    """A normal machine reports nothing; the configured values stand."""
+    from talaia.config import settings
+    from talaia.store import Store
+
+    monkeypatch.setattr(settings, "duckdb_memory_limit", "1GB")
+    monkeypatch.setattr(settings, "duckdb_threads", 4)
+    monkeypatch.setattr("talaia.diagnostics.container_limits", lambda: {})
+    assert Store("/tmp/unused.duckdb")._sized_for_container() == ("1GB", 4)
+
+
+def test_diagnostics_reports_without_a_credential(store):
+    """It exists for a wedged deployment, so it must not need the keys to that
+    deployment - and must therefore carry nothing worth protecting."""
+    from talaia.diagnostics import report
+
+    r = report(store)
+    assert set(r) >= {"container", "disk", "duckdb", "write_health", "notes"}
+    blob = repr(r).lower()
+    for secret in ("talaia_sk_", "admin", "password", "api_key", "authorization"):
+        assert secret not in blob, f"diagnostics leaked {secret!r}"

@@ -843,6 +843,20 @@ _ES_PROVINCES = [
 ]
 
 
+@meta_router.get("/diagnostics", summary="Container limits, disk and write health")
+async def diagnostics() -> dict[str, Any]:
+    """Unauthenticated on purpose.
+
+    It reports limits, counters and free space - nothing secret, no data, no key
+    material - and it exists for the case where the deployment is wedged and the person
+    who needs to know why is not standing next to it. Requiring a credential to read a
+    memory limit would mean handing one over to get a bug fixed.
+    """
+    from ..diagnostics import report
+
+    return report(get_store())
+
+
 @admin_router.get("/places", summary="Place names the prefetch filter will match")
 async def prefetch_places() -> dict[str, Any]:
     """Suggestions for the place box.
