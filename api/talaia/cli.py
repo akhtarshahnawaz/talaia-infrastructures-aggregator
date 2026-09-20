@@ -18,6 +18,7 @@ from talaia.net import close_client  # noqa: E402
 from talaia.store import Store, set_store  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)-22s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("talaia.cli")
 
 

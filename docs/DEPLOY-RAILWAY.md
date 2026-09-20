@@ -201,12 +201,30 @@ INFO    talaia   bootstrap: es.ine.popgrid -> 63,522 rows
 INFO    talaia   bootstrap complete: {...}
 ```
 
-**5–10 minutes**, dominated by geocoding ~4,000 care-home addresses through CartoCiudad
-and the 60 MB population-grid download. Queries answered before it finishes return
-OpenStreetMap-only results with a warning rather than failing — by design.
+**Around an hour on an empty volume**, dominated by geocoding: ~4,000 care-home
+addresses and ~51,000 school addresses through CartoCiudad, plus the 60 MB
+population-grid download. Queries answered before it finishes return OpenStreetMap-only
+results with a warning rather than failing — by design.
 
 Ingestion runs **inside the API process on purpose**: DuckDB allows one writer, so a
 separate ingest process would be locked out while the service holds the file.
+
+### Redeploying during the bootstrap
+
+Every deploy restarts the container, which stops the ingest wherever it had got to. That
+is survivable — rows are written as each chunk of addresses resolves, and a source whose
+run did not reach `ok` is picked up again on the next boot:
+
+```
+INFO  es.meq.schools: geocoded 12,000/51,216 addresses (11,704 rows so far)
+...
+WARNING bootstrapping 1 source(s) not fully loaded yet: es.meq.schools
+```
+
+Resuming is cheap because geocoding results are cached permanently on the volume, so the
+second pass re-reads them rather than re-asking CartoCiudad. It is still wasted wall
+time. **If you can, avoid pushing during the first hour of a fresh volume**, and check
+`GET /v1/sources` for `last_status` before assuming a deploy is fully loaded.
 
 ---
 

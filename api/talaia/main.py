@@ -27,6 +27,11 @@ from .store import Store, get_store, set_store
 
 logging.basicConfig(level=logging.INFO,
                     format="%(levelname)-7s %(name)-22s %(message)s")
+# httpx logs every request at INFO. A cold national ingest geocodes ~51,000 addresses,
+# so that is ~65,000 lines of "HTTP/1.1 200" on stderr - which buries the handful of
+# lines that matter and, on a hosted platform, is enough to hit a log rate limit and
+# start dropping them. Our own connectors log what was fetched and how it went.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("talaia")
 
 DESCRIPTION = """
@@ -80,24 +85,39 @@ async def _flush_usage_loop(store) -> None:
             log.warning("usage flush failed: %s", exc)
 
 
+# A source is finished when its last run said so. "loaded" covers rows written before
+# runs were recorded; anything else - never run, interrupted part-way, failed - is work
+# still to do.
+_COMPLETE = {"ok", "loaded"}
+
+
 async def _pending_sources(store) -> list:
-    """Resident connectors that hold no rows yet.
+    """Resident connectors that are not fully loaded.
 
     Checked per source rather than "is the store empty", because the bootstrap runs as a
     background task: a redeploy part-way through leaves some sources loaded and the rest
     at zero, and an emptiness check then decides everything is fine and never finishes
     the job. That is how a deployment sits at three sources of twelve indefinitely.
+
+    Having rows is not enough either, now that a long ingest writes them as it goes: a
+    source interrupted at address 30,000 of 51,000 holds rows and is still unfinished.
+    The run status is what distinguishes the two, and re-running is safe because assets
+    upsert by id and the geocode cache makes a second pass cheap.
     """
     from .connectors.base import Tier
 
-    loaded: set[str] = set()
-    for table in ("assets", "networks", "pop_grid"):
-        try:
-            loaded |= {r[0] for r in
-                       await store.fetch(f"SELECT DISTINCT source_id FROM {table}")}
-        except Exception:  # pragma: no cover - table may not exist yet
-            pass
-    return [c for c in registry.by_tier(Tier.RESIDENT) if c.meta.id not in loaded]
+    try:
+        stats = await store.source_stats()
+    except Exception:  # pragma: no cover - tables may not exist yet
+        stats = {}
+    pending = []
+    for c in registry.by_tier(Tier.RESIDENT):
+        entry = stats.get(c.meta.id)
+        if not entry or not entry.get("rows"):
+            pending.append(c)
+        elif entry.get("last_status") not in _COMPLETE:
+            pending.append(c)
+    return pending
 
 
 async def _bootstrap(store, connectors=None) -> None:
@@ -173,7 +193,7 @@ async def lifespan(app: FastAPI):
         # empty volume self-heals, serving partial results until the load completes.
         pending = await _pending_sources(store)
         if pending:
-            log.warning("bootstrapping %d source(s) with no rows yet: %s",
+            log.warning("bootstrapping %d source(s) not fully loaded yet: %s",
                         len(pending), ", ".join(c.meta.id for c in pending))
             app.state.bootstrap_task = asyncio.create_task(_bootstrap(store, pending))
     if settings.warm_on_boot_list:

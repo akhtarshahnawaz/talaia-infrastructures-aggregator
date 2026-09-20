@@ -571,9 +571,14 @@ class Store:
                     f"SELECT source_id, count(*) FROM {table} GROUP BY source_id"):
                 if sid:
                     counts[sid] = counts.get(sid, 0) + n
+        # arg_max, not any_value: any_value picks an arbitrary row from the group, so a
+        # source with several runs could report the status of an old one next to the
+        # newest timestamp. That is merely confusing while every run is terminal, and
+        # actively wrong now that a long ingest records progress as it goes - the resume
+        # decision is made on this status.
         runs = await self.fetch(
-            "SELECT source_id, max(finished_at), any_value(status), any_value(error) "
-            "FROM source_runs GROUP BY source_id")
+            "SELECT source_id, max(finished_at), arg_max(status, finished_at), "
+            "arg_max(error, finished_at) FROM source_runs GROUP BY source_id")
         out: dict[str, dict] = {}
         for sid, cnt in counts.items():
             out[sid] = {"rows": cnt, "last_run_at": None, "last_status": "loaded",

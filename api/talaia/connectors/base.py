@@ -91,8 +91,17 @@ class Connector(ABC):
         raise NotImplementedError
 
     # -- shared plumbing ---------------------------------------------------
-    async def ingest(self, store, batch_size: int = 5_000) -> int:
-        """Fetch -> normalise -> upsert. Used by the CLI and the boot bootstrap."""
+    async def ingest(self, store, batch_size: int = 5_000,
+                     geocode_chunk: int = 500) -> int:
+        """Fetch -> normalise -> upsert. Used by the CLI and the boot bootstrap.
+
+        Address-only records are geocoded in chunks and written as each chunk lands,
+        rather than all at the end. The national school registry is ~51,000 addresses,
+        which is the best part of an hour; writing only at the end meant any restart in
+        that window - and every redeploy is one - threw the whole source away and started
+        from nothing. Progress is recorded per chunk so a resumed boot can tell a source
+        that finished from one that was interrupted.
+        """
         from ..norm import asset_id, point_wkt, valid_lonlat
         from ..taxonomy import get_subcategory
 
@@ -103,7 +112,7 @@ class Connector(ABC):
             async for raw in self.fetch():
                 for item in self.normalise(raw):
                     # Registries that publish an address but no coordinates are resolved
-                    # through the Tier C geocoder, in one batch after the fetch completes.
+                    # through the Tier C geocoder, in chunks once the fetch completes.
                     if item.needs_geocoding and not valid_lonlat(item.lon, item.lat):
                         pending_geocode.append(item)
                         continue
@@ -146,13 +155,28 @@ class Connector(ABC):
                     if len(batch) >= batch_size:
                         total += await store.upsert_assets(batch)
                         batch = []
-            if pending_geocode:
-                geocoded_rows, failed = await self._geocode_batch(pending_geocode, store)
-                skipped += failed
-                geocoded = len(geocoded_rows)
-                batch.extend(geocoded_rows)
+            # Land everything that already had coordinates before starting on the slow
+            # part, so an interruption during geocoding does not also cost the rows that
+            # never needed it.
             if batch:
                 total += await store.upsert_assets(batch)
+                batch = []
+            if pending_geocode:
+                log.info("%s: geocoding %s addresses in chunks of %s",
+                         self.meta.id, f"{len(pending_geocode):,}", geocode_chunk)
+            for start in range(0, len(pending_geocode), geocode_chunk):
+                chunk = pending_geocode[start:start + geocode_chunk]
+                geocoded_rows, failed = await self._geocode_batch(chunk, store)
+                skipped += failed
+                geocoded += len(geocoded_rows)
+                if geocoded_rows:
+                    total += await store.upsert_assets(geocoded_rows)
+                # Durable progress. Without it the rows are visible but the source looks
+                # finished, and a resumed boot would skip the remaining addresses.
+                await store.record_run(self.meta.id, "partial", total, started)
+                log.info("%s: geocoded %s/%s addresses (%s rows so far)", self.meta.id,
+                         f"{min(start + geocode_chunk, len(pending_geocode)):,}",
+                         f"{len(pending_geocode):,}", f"{total:,}")
             await store.record_run(self.meta.id, "ok", total, started)
             log.info("%s: ingested %s rows (%s geocoded, %s skipped for bad geometry, "
                      "%s outside %s)", self.meta.id, total, geocoded, skipped,

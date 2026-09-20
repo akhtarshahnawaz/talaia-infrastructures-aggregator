@@ -14,11 +14,27 @@ from .config import settings
 log = logging.getLogger("talaia.net")
 
 _client: httpx.AsyncClient | None = None
+_client_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None or _client.is_closed:
+    """The shared client, rebuilt if the loop it belongs to has gone.
+
+    An httpx client holds connections bound to the event loop that created it, and
+    ``is_closed`` stays False when that loop dies underneath it - so the cached client
+    looks healthy and every request through it raises "Event loop is closed". The server
+    runs one loop for its lifetime and never sees this; a test suite gives each test its
+    own loop and sees it intermittently, depending on which test happens to build the
+    client first.
+    """
+    global _client, _client_loop
+    try:
+        loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+    except RuntimeError:  # called outside a loop; nothing to compare against
+        loop = None
+    stale = loop is not None and _client_loop is not None and _client_loop is not loop
+    if _client is None or _client.is_closed or stale:
+        _client_loop = loop
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.http_timeout_s, connect=10.0),
             headers={"User-Agent": settings.user_agent},
@@ -29,10 +45,11 @@ def get_client() -> httpx.AsyncClient:
 
 
 async def close_client() -> None:
-    global _client
+    global _client, _client_loop
     if _client is not None and not _client.is_closed:
         await _client.aclose()
     _client = None
+    _client_loop = None
 
 
 class RateLimiter:

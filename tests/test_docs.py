@@ -92,3 +92,14 @@ def test_the_console_backend_is_marked_development_only():
         window = text[max(0, text.index("TALAIA_EMAIL_CONSOLE") - 500):]
         assert re.search(r"development|local|Never enable", window, re.I), (
             f"{doc} does not mark the console backend as development-only")
+
+
+def test_httpx_does_not_log_every_request():
+    """A cold national ingest makes ~65,000 requests. At INFO, httpx narrates all of
+    them onto stderr, which buries the real log and can trip a platform log rate limit.
+    """
+    import logging
+
+    import talaia.main  # noqa: F401  - importing configures logging
+
+    assert logging.getLogger("httpx").level >= logging.WARNING
