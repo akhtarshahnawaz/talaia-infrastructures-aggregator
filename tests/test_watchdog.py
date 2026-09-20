@@ -143,3 +143,54 @@ def test_live_cursors_are_tracked_so_they_can_be_interrupted(store):
         assert len(store._cursors) == 1
     assert not store._cursors
     assert store.interrupt_live_queries() == 0
+
+
+def test_the_write_path_never_hands_a_python_object_to_duckdb():
+    """Registering a pandas DataFrame and selecting from it is how the deployment
+    deadlocked: DuckDB scans a registered object by calling back into the interpreter,
+    across its own worker threads, while the single writer is held and an HTTP server is
+    running in the same process. It wedged there repeatedly - not slow, stopped, and
+    immune to interrupting the query, because DuckDB was not executing anything.
+
+    Staging through a real table keeps the long statement inside DuckDB.
+    """
+    import pathlib
+    import re
+
+    source = (pathlib.Path(__file__).resolve().parents[1]
+              / "api" / "talaia" / "store.py").read_text()
+    code = "\n".join(line for line in source.splitlines()
+                     if not line.lstrip().startswith(("#", '"', "*")))
+    assert "register(" not in code, (
+        "store.py registers a Python object with DuckDB; stage into a temp table instead")
+    assert not re.search(r"^\s*import pandas", code, re.M), (
+        "pandas is back in the write path")
+
+
+def test_staging_chunks_bound_the_statement_size(store):
+    """One statement per row is slow; one statement for everything is a hundred thousand
+    parameters. Chunked is neither."""
+    from talaia.store import Store
+
+    with store.cursor() as cur:
+        cur.execute("CREATE OR REPLACE TEMP TABLE _t (a VARCHAR, b INTEGER)")
+        Store._stage(cur, "_t", 2, [(f"x{i}", i) for i in range(2500)], chunk=1000)
+        assert cur.execute("SELECT count(*) FROM _t").fetchone()[0] == 2500
+
+
+async def test_a_real_batch_round_trips_through_staging(store):
+    """The staging table has to accept everything the pipeline produces - JSON blobs,
+    NULLs, floats and a timestamp - or an ingest fails on the first awkward row."""
+    from talaia.store import ASSET_COLUMNS
+
+    rows = [{
+        "id": f"a{i}", "source_id": "t", "source_ref": str(i), "category": "education",
+        "subcategory": "school", "name": None if i % 3 else "Escola d'Or, \"la\"",
+        "wkt": "POINT(2.17 41.39)", "lon": 2.17, "lat": 41.39,
+        "geometry_kind": "point", "address": {"street": "C/ Major, 1\nbis"},
+        "contacts": None, "capacity": {"students": 300}, "attributes": None,
+        "footprint_m2": None, "floors": 2.0, "confidence": 0.5, "tile_key": None,
+    } for i in range(50)]
+    assert await store.upsert_assets(rows) == 50
+    got = await store.fetch("SELECT count(*), count(name) FROM assets")
+    assert got[0][0] == 50

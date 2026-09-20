@@ -157,7 +157,10 @@ class Settings(BaseSettings):
     # write is not serving and a restart is what a human would do anyway.
     write_watchdog_interval_s: float = 10.0
     write_stuck_after_s: float = 90.0
-    write_fatal_after_s: float = 420.0
+    # Interrupting turned out not to free the deadlock it was written for - DuckDB was
+    # not executing anything, so there was nothing to cancel - so do not sit there for
+    # seven minutes hoping. Try it, then restart.
+    write_fatal_after_s: float = 240.0
     write_watchdog_may_exit: bool = True
 
     # --- server ----------------------------------------------------------

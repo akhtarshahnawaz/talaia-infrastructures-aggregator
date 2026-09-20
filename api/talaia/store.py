@@ -307,26 +307,78 @@ class Store:
         return self._fetch(sql, params)
 
     # -- writes ------------------------------------------------------------
+    # Column types for the staging table. Everything the pipeline produces is text, a
+    # number, a JSON blob or a timestamp; geometry is built from WKT inside DuckDB.
+    _STAGE_TYPES = {
+        "lon": "DOUBLE", "lat": "DOUBLE", "footprint_m2": "DOUBLE", "floors": "DOUBLE",
+        "confidence": "DOUBLE", "population": "DOUBLE", "area_m2": "DOUBLE",
+        "year": "INTEGER", "retrieved_at": "TIMESTAMP",
+    }
+
+    @staticmethod
+    def _stage(cur, table: str, ncols: int, values: list[tuple],
+               chunk: int = 1_000) -> None:
+        """Fill a staging table with bound multi-row INSERTs.
+
+        Not executemany, which runs one statement per row and costs 1.4s where this
+        costs 0.3s. Not a registered DataFrame, which is faster still and is exactly
+        what deadlocked. Chunked so a batch never becomes a statement with a hundred
+        thousand parameters.
+        """
+        row_sql = "(" + ", ".join("?" for _ in range(ncols)) + ")"
+        for start in range(0, len(values), chunk):
+            part = values[start:start + chunk]
+            flat: list = []
+            for row in part:
+                flat.extend(row)
+            cur.execute(
+                f"INSERT INTO {table} VALUES {', '.join([row_sql] * len(part))}", flat)
+
     def _bulk_upsert(self, table: str, columns: list[str], rows: list[dict]) -> int:
+        """Stage into a real DuckDB table, then insert from it.
+
+        The obvious way is to register the batch as a pandas DataFrame and select from
+        that, and this did for a long time. The trouble is that it leaves Python in the
+        middle of the statement: DuckDB scans a registered DataFrame by calling back
+        into the interpreter, across however many worker threads it was given, while the
+        single writer lock is held and an HTTP server is running in the same process.
+        Writes on the deployment would wedge there indefinitely - not slow, stopped, and
+        immune to interrupting the query, which only cancels work DuckDB is actually
+        doing.
+
+        Staging into a native temp table with bound parameters keeps the long statement
+        entirely inside DuckDB. It also drops pandas from the write path, and with it a
+        catalog view created and dropped on every batch.
+        """
         if not rows:
             return 0
-        import pandas as pd
 
-        norm: list[dict] = []
+        json_cols = ("address", "contacts", "capacity", "attributes")
+        values: list[tuple] = []
         for r in rows:
-            item = {c: r.get(c) for c in columns}
-            for jcol in ("address", "contacts", "capacity", "attributes"):
-                if jcol in item:
-                    item[jcol] = _j(item.get(jcol))
-            item["retrieved_at"] = item.get("retrieved_at") or _utcnow()
-            norm.append(item)
-        df = pd.DataFrame(norm, columns=columns)
+            item = []
+            for c in columns:
+                v = r.get(c)
+                if c in json_cols:
+                    v = _j(v)
+                elif c == "retrieved_at":
+                    v = v or _utcnow()
+                item.append(v)
+            values.append(tuple(item))
+        if "retrieved_at" in columns:
+            pass
+        else:  # the schema wants it even when the caller did not supply it
+            columns = [*columns, "retrieved_at"]
+            stamp = _utcnow()
+            values = [(*v, stamp) for v in values]
+
+        decl = ", ".join(f"{c} {self._STAGE_TYPES.get(c, 'VARCHAR')}" for c in columns)
 
         select_parts = []
         for c in columns:
             if c == "wkt":
                 select_parts.append("ST_GeomFromText(wkt) AS geom")
-            elif c in ("address", "contacts", "capacity", "attributes"):
+            elif c in json_cols:
                 select_parts.append(f"CAST({c} AS JSON) AS {c}")
             else:
                 select_parts.append(c)
@@ -340,14 +392,15 @@ class Store:
                 target_cols.append(col)
 
         with self.cursor() as cur:
-            cur.register("_incoming", df)
+            cur.execute(f"CREATE OR REPLACE TEMP TABLE _incoming ({decl})")
+            self._stage(cur, "_incoming", len(columns), values)
             cur.execute(
                 f"INSERT OR REPLACE INTO {table} ({', '.join(target_cols)}) "
                 f"SELECT {', '.join(select_parts)} FROM _incoming "
                 f"WHERE wkt IS NOT NULL AND wkt <> ''"
             )
-            cur.unregister("_incoming")
-        return len(df)
+            cur.execute("DROP TABLE _incoming")
+        return len(values)
 
     async def upsert_assets(self, rows: list[dict]) -> int:
         async with self._writing("upsert_assets"):
@@ -360,21 +413,24 @@ class Store:
             return await asyncio.to_thread(self._bulk_upsert, "networks", NETWORK_COLUMNS, rows)
 
     def _upsert_popgrid(self, rows: list[dict]) -> int:
+        # Staged, not registered - see _bulk_upsert for why Python must stay out of a
+        # statement that holds the single writer.
         if not rows:
             return 0
-        import pandas as pd
-
-        df = pd.DataFrame(rows, columns=["cell_id", "wkt", "population", "area_m2",
-                                         "source_id", "year"])
+        cols = ["cell_id", "wkt", "population", "area_m2", "source_id", "year"]
+        values = [tuple(r.get(c) for c in cols) for r in rows]
         with self.cursor() as cur:
-            cur.register("_pg", df)
+            cur.execute(
+                "CREATE OR REPLACE TEMP TABLE _pg (cell_id VARCHAR, wkt VARCHAR, "
+                "population DOUBLE, area_m2 DOUBLE, source_id VARCHAR, year INTEGER)")
+            self._stage(cur, "_pg", len(cols), values)
             cur.execute(
                 "INSERT OR REPLACE INTO pop_grid (cell_id, geom, population, area_m2, "
                 "source_id, year) SELECT cell_id, ST_GeomFromText(wkt), population, "
                 "area_m2, source_id, year FROM _pg WHERE wkt IS NOT NULL"
             )
-            cur.unregister("_pg")
-        return len(df)
+            cur.execute("DROP TABLE _pg")
+        return len(values)
 
     async def upsert_popgrid(self, rows: list[dict]) -> int:
         async with self._writing("upsert_popgrid"):
@@ -652,12 +708,23 @@ class Store:
                    else error_backoff_minutes)
         return await asyncio.to_thread(self._tile_states, tile_keys, ttl, backoff)
 
-    def _mark_tiles(self, tiles: list[dict]) -> None:
-        import pandas as pd
+    _TILE_COLS = ["tile_key", "min_lon", "min_lat", "max_lon", "max_lat", "fetched_at",
+                  "status", "feature_count", "network_count", "error"]
 
-        df = pd.DataFrame(tiles)
+    def _mark_tiles(self, tiles: list[dict]) -> None:
+        # This is the cache-warm write path. Registered as a DataFrame it wedged the
+        # same way a bulk asset insert did, which is why a warm sat at 0% - it was not
+        # slow, it was stopped on its first commit.
+        if not tiles:
+            return
+        values = [tuple(t.get(c) for c in self._TILE_COLS) for t in tiles]
         with self.cursor() as cur:
-            cur.register("_tiles", df)
+            cur.execute(
+                "CREATE OR REPLACE TEMP TABLE _tiles (tile_key VARCHAR, min_lon DOUBLE, "
+                "min_lat DOUBLE, max_lon DOUBLE, max_lat DOUBLE, fetched_at TIMESTAMP, "
+                "status VARCHAR, feature_count INTEGER, network_count INTEGER, "
+                "error VARCHAR)")
+            self._stage(cur, "_tiles", len(self._TILE_COLS), values)
             cur.execute(
                 "INSERT OR REPLACE INTO osm_tile_cache "
                 "(tile_key, min_lon, min_lat, max_lon, max_lat, fetched_at, status, "
@@ -665,7 +732,7 @@ class Store:
                 "SELECT tile_key, min_lon, min_lat, max_lon, max_lat, fetched_at, status, "
                 "feature_count, network_count, error, fetched_at FROM _tiles"
             )
-            cur.unregister("_tiles")
+            cur.execute("DROP TABLE _tiles")
 
     async def mark_tiles(self, tiles: list[dict]) -> None:
         if not tiles:
